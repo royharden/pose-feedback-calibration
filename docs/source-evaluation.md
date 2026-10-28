@@ -158,3 +158,74 @@ marker mismatch/wording dispositions and sealed rerender/no-reevaluation checks.
 private scorer/CLI integration, calibrated A2 activation, packaging/wheel behavior,
 device/offline/CI/runtime and independent verifier remain unverified. No fixtures,
 expected answers, held-out schedules, labels or results were authored by this package.
+
+## Optional timing/device report extension (source only)
+
+The optional LAST ResultBundle field is timing: PublicTimingReport|None=None.
+Existing constructor calls continue working. payload/canonical_json OMIT the timing
+key when None, preserving the original canonical payload/hash for old no-timing
+bundles; unmeasured_bundle() remains empty, with timing=None. load_bundle_json
+explicitly accepts the original closed field set without timing and supplies None.
+New nonnull timing payloads carry their own schema_version=1 and are fully hydrated
+into frozen DTOs before validation/hash verification. Unknown/missing fields still
+fail; an upgraded source cannot silently relabel a new canonical hash as an old seal.
+
+PublicTimingReport contains TimingObservation, PublicTimingSummary, optional
+PublicSessionTiming and PublicDeviceProtocol. Phase/stage DTOs preserve the producer
+p50/p95/p99, valid/unknown counts/reasons, first5s exclusion, retained/overflow
+population and nullable backend drops/overwrites. No quantile/statistics implementation
+is duplicated. Session frame identities are checked; source unavailable slots,
+backend counts, controller drops and slot overwrites remain distinct. Only the fixed
+process_monotonic_ns/capture-return-to-render-enqueue boundary is allowed; photon
+latency, sensor exposure and LIVE_STREAM parity remain null, never inferred.
+
+results_writer.timing_report(*,span_summary=None,session_aggregate=None,
+device_profiles,source_sha256,observation_status,operator_receipt_sha256=None)
+returns PublicTimingReport. Exactly one aggregate source is required. Supply the exact
+SpanWriter.summary() OR SessionResult.aggregate(), and current
+device_profile_templates() shape (including any later operator-supplied permitted
+observations). Only the approved closed source schema is accepted: no Span,
+ClockAnchor, Event/presentation arrays, pixels, source/person/window identifiers,
+serials, private paths or arbitrary error/CPU/SDK descriptions can enter this DTO.
+Hardware/runtime evidence is closed metadata or private-receipt SHA commitments.
+
+source_sha256 is the lowercase SHA256 of canonical JSON (sort_keys=True,
+allow_nan=False,separators=(",",":"),UTF-8) for the complete packet:
+source_kind (span_writer_summary or session_result_aggregate), aggregate (the exact
+selected producer aggregate), and device_profiles. The converter seals its immutable
+DTO snapshot rebuilt into that same source shape, not subsequently mutable caller
+dictionaries. The source seal binds supplied aggregate values, not the authenticity
+of actual native measurements or human receipts.
+Core validate_timing_report uses the shared timing_source_sha256 immutable packet
+serializer, so direct DTO validation, JSON hydration and rendering also enforce the
+source seal; there is no converter-only bypass or second packet implementation.
+
+observation_status is REQUIRED and closed: unmeasured, incomplete, operator_reported.
+Any nonempty timing/session/device observation requires a non-unmeasured status and
+explicit operator_receipt_sha256; unmeasured rejects observed values. Operator-reported
+booleans/digests are NEVER independent verification. Two device slots with three60s
+requested session slots each are protocol parameters, not observed machines or
+sessions. Device profiles retain unverified_operator_receipts/trust-limit labels;
+physical distinction, rights, native offline acceptance, denial/restoration/release
+and real observations still require actual authorized operator/custodian evidence.
+Unknown backend counts stay null even if a synchronous controller reports zero slot
+overwrites. No source/device/preview/renderer function is invoked by the converter.
+
+attach_timing(bundle,*,span_summary=None,session_aggregate=None,device_profiles,
+source_sha256,observation_status,operator_receipt_sha256=None)->ResultBundle returns
+a NEW frozen bundle. It validates the exact source seal and full public timing DTO,
+marks reported device state incomplete, and preserves the original evaluation seal.
+For an otherwise-empty unmeasured bundle with explicitly reported timing, it uses
+incomplete state/source timing seal; it cannot manufacture accuracy/calibration or
+successful native observations. Existing measured count results are not recomputed.
+render_html adds actual aggregate phase/stage quantile, session-accounting and device
+protocol/observation tables; the complete closed schema is also in escaped JSON text.
+All display values are copied from the same sealed DTO. No renderer/loader or timing
+source was executed during construction.
+
+Later authorized validation remains required: original canonical-hash compatibility,
+closed JSON hydration/roundtrip with/without timing, exact producer source seals,
+known-vs-unknown backend counts, received/retained/overflow and controller identities,
+null/malformed quantiles/phase support, mutable caller snapshot isolation, protocol
+slots versus operator observations, finite/bounds/reason/privacy rejection and actual
+HTML/JSON table fidelity. These source paths establish no runtime/independence pass.
