@@ -56,6 +56,45 @@ class CounterRequest:
     config: CounterConfig
 
 
+@dataclass(frozen=True, repr=False)
+class HeldoutSourceAdmission:
+    """Separate consumed-attempt capability; never a real-dev FitAuthorization.
+
+    The host callback must freshly validate the exact consumed attempt, pins,
+    extracted state, window bytes, consent, offline and private boundaries.
+    An attempt ID or hash without this required callback grants no access.
+    """
+
+    window: WindowInput
+    attempt_pins_hash: str
+    provenance_receipt: str
+    native_offline_receipt: str
+    private_boundary_receipt: str
+    verify_current: Callable[[], bool]
+
+    @property
+    def corpus(self) -> str:
+        return "real_heldout"
+
+    @property
+    def trace_hash(self) -> str:
+        return self.window.trace_hash
+
+    def require(self, window: WindowInput | None) -> None:
+        if (type(window) is not WindowInput or window != self.window
+                or window.corpus != "real_heldout" or not callable(self.verify_current)):
+            raise PermissionError("bound_consumed_attempt_required")
+        for value in (window.trace_hash, self.attempt_pins_hash, self.provenance_receipt,
+                      self.native_offline_receipt, self.private_boundary_receipt):
+            require_sha256(value)
+        try:
+            allowed = self.verify_current() is True
+        except Exception:
+            allowed = False
+        if not allowed:
+            raise PermissionError("current_consumed_attempt_verification_required")
+
+
 @dataclass(frozen=True)
 class SourceResult:
     predictions: tuple[Prediction, ...]
@@ -71,14 +110,18 @@ class SourceResult:
 
 
 def run_source(source_factory: Callable[[], LandmarkSource], requests: tuple[CounterRequest, ...],
-               *, admission: SourceAdmission, window: WindowInput | None = None) -> SourceResult:
+               *, admission: SourceAdmission | HeldoutSourceAdmission,
+               window: WindowInput | None = None) -> SourceResult:
     """Open one fresh source once, dispatch identical geometry to every arm.
 
     The factory opens/prepares its returned source. Admission is checked BEFORE
     calling it; a provider must verify bytes/rights/offline/private boundaries before
-    returning the admission assertion. Held-out editions are not accepted here.
+    returning the admission assertion. Held-out access requires the separate
+    consumed-attempt capability; a real-dev authorization cannot grant it.
     No frame, timestamp, clock anchor or hash is synthesized or verified by us.
     """
+    if type(admission) not in (SourceAdmission, HeldoutSourceAdmission):
+        raise PermissionError("typed_source_admission_required")
     admission.require(window)
     if (type(requests) is not tuple or not requests or len(requests) > 128
             or any(type(r) is not CounterRequest for r in requests)):
@@ -223,7 +266,7 @@ def write_development_aggregate(path: Path, aggregate: DevelopmentAggregate) -> 
 
 
 def write_unmeasured_report(directory: Path) -> str:
-    """DL2's actual aggregate-only API, lazy until its source is integrated.
+    """Actual integrated aggregate-only API, kept lazy at the output boundary.
 
     Never converts development predictions into a measured bundle or calls the
     private evaluator. Partial artifacts on later failure stay for disposition.
