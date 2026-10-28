@@ -234,6 +234,9 @@ class HardGatedCounter(A1Counter):
             self.source_error(Reason.INVALID_INPUT)
             self._g = None
             return
+        if frame.evidence_reason in {Reason.INVALID_REFERENCE, Reason.INVALID_INPUT}:
+            self.source_error(frame.evidence_reason)
+            self._g = None
         if frame.poses == 2:
             self.hard_gate = True
             self._reason(Reason.SECOND_PERSON)
@@ -245,7 +248,7 @@ class HardGatedCounter(A1Counter):
         if self.hard_gate or self._error:
             return False
         if self._g is None:
-            self._reason(Reason.MOVEMENT_INPUTS)
+            self._reason(frame.evidence_reason or Reason.MOVEMENT_INPUTS)
             return False
         if self._g < self.config.movement_threshold:
             self._reason(Reason.MOVEMENT_LOW)

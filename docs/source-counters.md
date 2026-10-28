@@ -26,6 +26,24 @@ before counter use; interval and torso scale cannot drift. DL1/INT own reconcili
 of irregular native source timestamps, side selection and aspect-corrected angles.
 No FrameBatch duplicate or import of an unbuilt DL1 module is introduced.
 
+Exact bridge: schema.attach_evidence(geometry_frame.angle_frame,
+elbow_left=producer_left_elbow, elbow_right=producer_right_elbow,
+hip_xy=producer_normalized_hip_xy, torso_scale=producer_fixed_torso_length_px,
+nominal_interval_s=producer_fixed_interval, slot_index=producer_actual_slot,
+missing_slots=producer_missing_tuple, late_slots=producer_late_tuple).
+This function accepts producer VALUES, not GeometryFrame itself; DL1 owns the exact
+GeometryFrame field names and geometry calculations. Hip coordinates must already
+be normalized; do not normalize twice or compute elbows again in the consumer.
+Producer None elbows -> elbow_inputs_missing. Missing grid or a time/grid mismatch
+-> evidence_metadata_unavailable; time is never rounded/replaced. Missing hip/torso
+-> movement_inputs_missing; invalid nonpositive/nonfinite scale -> named source error.
+These reasons sit in AngleFrame.evidence_reason while evidence remains None, closing
+A2-H without withholding legacy A1's original scalar time/angle. Invalid metadata types
+are named invalid_input. Warm-up replay retains original t<3, so evidence movement
+history is excluded/reset before scoring. Delay until3s does not create scored history.
+The bridge is original source only, not a claim of joined producer execution; final
+DL1 elbow/grid API is still being repaired and INT owns remaining joined reconciliation.
+
 Absent A2-H metadata closes the movement gate by movement_inputs_missing; it never
 becomes perfect evidence. Raw A1 geometric candidates run alongside gated state.
 Prediction candidate_count is RAW A1 candidates for every arm; filtered_count is

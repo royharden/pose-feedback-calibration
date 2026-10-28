@@ -1,6 +1,6 @@
 """Immutable scalar seam for a future aspect-corrected landmark adapter."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from math import isfinite
 
@@ -30,6 +30,8 @@ class Reason(StrEnum):
     CALIBRATION_UNAVAILABLE = "calibration_unavailable"
     POLICY_UNAVAILABLE = "visibility_policy_unavailable"
     VISIBILITY_POLICY = "visibility_below_threshold"
+    ELBOW_INPUTS = "elbow_inputs_missing"
+    EVIDENCE_UNAVAILABLE = "evidence_metadata_unavailable"
 
 
 def reason_message(reason: Reason) -> str:
@@ -86,6 +88,7 @@ class AngleFrame:
     visibility: tuple[float, float, float] = (1.0, 1.0, 1.0)
     poses: int = 1
     evidence: FrameEvidence | None = None
+    evidence_reason: Reason | None = None
 
     def validate(self) -> None:
         if not isfinite(self.t_media) or self.t_media < 0:
@@ -102,6 +105,60 @@ class AngleFrame:
             if not isinstance(self.evidence, FrameEvidence):
                 raise ValueError(Reason.INVALID_INPUT)
             self.evidence.validate(self.t_media)
+        if self.evidence_reason is not None and (not isinstance(self.evidence_reason, Reason)
+                or self.evidence_reason not in {
+            Reason.ELBOW_INPUTS, Reason.EVIDENCE_UNAVAILABLE,
+            Reason.MOVEMENT_INPUTS, Reason.INVALID_REFERENCE, Reason.INVALID_INPUT,
+        }):
+            raise ValueError(Reason.INVALID_INPUT)
+        if self.evidence is not None and self.evidence_reason is not None:
+            raise ValueError(Reason.INVALID_INPUT)
+
+
+def attach_evidence(frame: AngleFrame, *, elbow_left: float | None,
+                    elbow_right: float | None, hip_xy: tuple[float, float] | None,
+                    torso_scale: float | None, nominal_interval_s: float | None,
+                    slot_index: int | None, missing_slots: tuple[int, ...] = (),
+                    late_slots: tuple[int, ...] = ()) -> AngleFrame:
+    """Bridge producer scalars without importing geometry or changing media time.
+
+    Missing joints/nominal grid stay named-unavailable. No rounded timestamp,
+    elbow inference, nominal interval, slot ID or perfect support is invented.
+    A2-H consumes the reason; legacy A1 still consumes the original scalar frame.
+    """
+    if not isinstance(frame, AngleFrame):
+        raise ValueError(Reason.INVALID_INPUT)
+    frame.validate()
+    reason: Reason | None = None
+    try:
+        invalid_scale = torso_scale is not None and (not isfinite(torso_scale) or torso_scale <= 0)
+    except (TypeError, ValueError, OverflowError):
+        return replace(frame, evidence=None, evidence_reason=Reason.INVALID_INPUT)
+    if invalid_scale:
+        reason = Reason.INVALID_REFERENCE
+    elif elbow_left is None or elbow_right is None:
+        reason = Reason.ELBOW_INPUTS
+    elif hip_xy is None or torso_scale is None:
+        reason = Reason.MOVEMENT_INPUTS
+    elif nominal_interval_s is None or slot_index is None:
+        reason = Reason.EVIDENCE_UNAVAILABLE
+    if reason is not None:
+        return replace(frame, evidence=None, evidence_reason=reason)
+    try:
+        if not isinstance(hip_xy, tuple) or len(hip_xy) != 2:
+            raise ValueError(Reason.INVALID_INPUT)
+        # The branches above have established these required metadata values.
+        assert elbow_left is not None and elbow_right is not None
+        assert torso_scale is not None and nominal_interval_s is not None
+        assert slot_index is not None
+        evidence = FrameEvidence(elbow_left, elbow_right, *hip_xy, torso_scale,
+                                 nominal_interval_s, slot_index, missing_slots, late_slots)
+        evidence.validate(frame.t_media)
+    except (ValueError, TypeError, OverflowError) as exc:
+        reason = (Reason.EVIDENCE_UNAVAILABLE if exc.args and exc.args[0] == Reason.EXPECTED_FRAMES
+                  else Reason.INVALID_INPUT)
+        return replace(frame, evidence=None, evidence_reason=reason)
+    return replace(frame, evidence=evidence, evidence_reason=None)
 
 
 @dataclass(frozen=True)
