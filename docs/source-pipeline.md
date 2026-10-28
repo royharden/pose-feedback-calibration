@@ -39,6 +39,7 @@ all configs in one pass per window. It is an internal future all-arm source seam
 not a held-out edition command. The ordinary LOPO callback can reopen dev traces
 for its separate frozen configurations; it never receives held-out corpus inputs.
 No shared schema, detector, tuning, calibration or metric implementation is copied.
+The concrete trusted-host caller now lives in `evaluation.host`; see source-host.md.
 
 The required verifier is a trusted local operator/provider boundary: before
 access it checks exact trace bytes against the window commitment, provenance,
@@ -50,8 +51,10 @@ assertion. A real-dev source must produce video/camera provenance, whereas
 development sources require declared development IDs and synthetic/fixture kind.
 Synthetic sources cannot use real-dev receipts or enter tuning here. Python
 closures and side channels require later label-isolation and provider audits.
-Held-out/custody access, reservation and sealing remain blocked until the guarded
-custodian path is integrated; no source construction grants permission to run it.
+The dev callback still rejects held-out input. The separate consumed-attempt
+HeldoutSourceAdmission and trusted-host custodian source now express that path;
+actual private access/execution remains blocked until owner evidence/capabilities
+and later runtime authorization exist. Source construction grants no study access.
 
 The private-boundary receipt is required for real-dev and forbidden for development.
 Before issuing it, the provider must retain the existing `PrivacyPolicy` verified
@@ -100,10 +103,10 @@ The current accepted caller contract is DL2s actual `ResultBundle`, with
 `unmeasured_bundle()`, `bundle_hash(bundle)` and
 `write_artifacts(directory, bundle, expected_bundle_hash=...)`.
 `--unmeasured-report NEW_DIRECTORY` names that API through a lazy future import.
-This branch does not yet contain report.py: it returns explicit
+This branch now contains report.py and its exact source signatures are reconciled.
+The lazy unavailable-import branch still returns explicit
 `report_source_unavailable`, creates no report directory and exits nonzero.
-When INT integrates DL2s source and grants reconciliation, the same caller can
-write an empty unmeasured shell only, never reinterpret generated events as truth
+The integrated caller can write an empty unmeasured shell only, never reinterpret generated events as truth
 or measured support. Fixed report.json/report.html/coverage.svg are exclusively
 created by DL2s writer; the caller requires a fresh local directory with existing
 parent and rejects link/junction, ADS, reserved-device and UNC paths. Failures

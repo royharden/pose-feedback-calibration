@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument("--development-report", type=Path, metavar="NEW_JSON",
                         help="Exclusive aggregate-only JSON export; no truth metrics or study claim")
     parser.add_argument("--unmeasured-report", type=Path, metavar="NEW_DIRECTORY",
-                        help="Empty unmeasured report via actual report API, when integrated")
+                        help="Empty unmeasured aggregate report; no truth metrics or study claim")
     args = parser.parse_args()
     if args.generate_development is None and (
         args.perturbation is not None or args.negative is not None or args.strength != 1
