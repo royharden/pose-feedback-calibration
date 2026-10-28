@@ -278,8 +278,10 @@ def run_session(
                     gate = gate_reason(detector, latest_scalar)
                     message = "provisional count" if gate is None else f"not counting: {Reason(gate).value}"
                 rendered = renderer.render(batch, DisplayState(len(emitted), tuple(new_events), message))
-                if not isinstance(rendered, RenderReceipt) or type(rendered.stop_requested) is not bool:
+                if not isinstance(rendered, RenderReceipt):
                     rendered = None
+                    raise SourceError("invalid_render_receipt")
+                if type(rendered.stop_requested) is not bool:
                     raise SourceError("invalid_render_receipt")
             finally:
                 if not frame_processed:
