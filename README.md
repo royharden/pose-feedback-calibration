@@ -1,56 +1,37 @@
 # pose-feedback-calibration
 
-M17 source-only foundation. Runtime unverified; no measured accuracy or calibration result.
+M17 source construction. Runtime unverified; no measured accuracy, calibrated probability, consent, privacy/security acceptance, or device result.
 
-Authoritative adopted plan: `../planning/promoted/PLAN-M17-v1.md`. Coordination and transcripts remain outside this product repository.
+Authoritative frozen plan: `../planning/promoted/PLAN-M17-v1.md` in the private outer shell. Coordination, private data and transcripts stay outside this product repository. Later direct owner authorization permits original source construction; human admission/rights/independence gates remain pending. Historical source predates G0; no retrospective pre-code admission is asserted.
 
-This milestone implements the A1 scalar-angle state machine and numeric feature contracts.
-It does not perform pretrained landmark inference. A future adapter must choose the side from
-warm-up joint visibility, apply pixel-aspect correction, and supply one finite knee angle per
-frame. The core fixes its standing reference to the median valid first-three-second angles.
-One `Counter` instance owns one stream; scoring starts at 3 s and observed returns must precede
-30 s. Tail samples can confirm an existing return. They cannot start a new scored candidate.
+The original A1 scalar/numeric foundation has been extended with bounded immutable 33-landmark inputs, development fixture/generator sources, geometry and private-path guards, lazy device-adapter source, Z/A0/A0v/A1/A2-H counter source and an explicit consumer evidence bridge. The CLI now joins development landmarks to geometry, evidence and the counter. These source interfaces have only been statically reviewed. Nothing here establishes a functioning joined runtime.
 
-The A1 counter applies a causal time-based EMA, descent/return hysteresis, minimum duration,
-continuous 0.3 s standing confirmation and a 1.5 s confirmation deadline. Incomplete returns
-are tagged at finish, never synthesized. Emitted events are immutable: later input errors
-leave them visible while setting the final answer to null. Offline display timestamps use
-the media-seconds domain and input-stream scope; do not subtract host clock times from them.
-`candidate_count` includes eligible observed returns, including unconfirmed ones;
-`filtered_count` is confirmed A1 events. A1 has no q/movement/confidence filtering.
-Finishing before the scored interval ends is an incomplete-window error. The CLI preserves
-emitted events in error JSON and returns a nonzero exit code on source/core errors.
+A geometry instance freezes warm-up side/torso references using only media [0,3), then replays warm-up frames in order before the first scored sample. The CLI passes replayed warm-up angles without movement evidence; scored/tail frames pass explicit producer values through `attach_evidence`. Source media times are preserved. Missing elbow/hip/grid support closes movement evidence with named reasons. Irregular timestamps never become fabricated aligned samples.
 
-`features.py` supplies bounded amplitude/duration consistency, union-counted missing/late
-slots, trailing-six-second movement, q, and the six-input window feature vector.
-The movement input hip coordinates must already be normalized by a valid warm-up torso
-length. It rejects future/pre-reset/nonmonotonic inputs. Feature summaries and A2-H gate
-wiring are deferred. No probability is fabricated: `p_exact` is always null.
+A1 uses causal EMA/hysteresis, minimum cycle duration, observed return before 30 seconds, continuous 0.3-second standing confirmation and a 1.5-second deadline. Tail frames only confirm an eligible earlier return. A2-H additionally applies q/movement/sticky hard gates; default scalar input lacks its movement metadata and cannot claim valid support. Emitted events survive later refusal/error. Whole-window final answer is null unless answered. Offline display time is confirmation media time, not a host or camera-to-photon measurement.
 
-The JSONL example is builder-authored synthetic **development** input, not independent
-evaluation data. There are no held-out answers, independent schedules, or real media here.
-The CLI labels input as synthetic; it cannot establish data rights or protect private paths.
-Do not pass real-derived traces to this seam. Human admission, rights, private-root enforcement,
-held-out custody and study execution require separate authorized work.
+A0v accepts an explicit development visibility-ranking threshold; it is not an OOF-selected policy or probability. The development CLI requires that explicit A0v threshold. The counter API without a policy reports `not_run`; calibrated A2 is not exposed by this CLI and remains unavailable until separately integrated valid calibration and operating-point evidence exist. No result is a form, medical, safety or coaching judgment.
 
-After Dirty Mode closes and an operator authorizes runtime checks, the proposed local journey is:
+## Later authorized local development commands
+
+These commands have **not been run**. Dirty Mode permits source/static checks only. Do not execute until runtime validation is authorized and the Python environment is verified.
 
 ```powershell
 $env:PYTHONPATH = 'src'
+# Original scalar development input, legacy JSON shape retained:
 python -m posecount.cli --synthetic examples/synthetic_development.jsonl
+# Original articulated input, one permitted development seed, no expected truth:
+python -m posecount.cli --generate-development 1000 --arm A2-H
+# One builder-defined observation mechanism/strength; not independent evaluation:
+python -m posecount.cli --generate-development 1001 --arm A1 --perturbation jitter --strength 2
+# A declared development-only FrameBatch JSONL, not real-derived traces:
+python -m posecount.cli --landmarks <DEVELOPMENT_JSONL_PATH> --arm A1
 ```
 
-This command has **not been run**. No dependencies are needed by the source core. Packaging
-declares Python 3.12 and setuptools; neither installation nor wheel compatibility was checked.
+Only one input option is accepted. Generator seeds are 1000..1599; no 600-window corpus is generated by a CLI invocation or claimed present. Generator switches require generated input. Development fixture declarations cannot certify rights; never pass real-derived media/traces through these CLI modes. No CLI option starts a camera, processes real video, downloads a model, imports optional device packages or acquires data. Model manifest fields remain unacquired/null. No key/account is needed; `<DEVELOPMENT_JSONL_PATH>` is an input-path placeholder, never a credential.
 
-Integration seams: `AngleFrame -> Counter.update -> tuple[Event, ...]`, then idempotent
-`Counter.finish -> Prediction`; the CLI only serializes this result. Config supports the frozen
-A1 grid (tau 0.1/0.2 s, margin 25/40 degrees, minimum duration 0.6/1.0 s). No cross-app imports.
-This is a partial numeric seam, not the plan's full 33-landmark `FrameBatch` or source adapter.
+Successful processing emits one JSON prediction. Landmark modes add `development_context` stating builder provenance, unverified runtime and unadmitted study. Legacy scalar output keeps the existing prediction shape. A source failure emits the counter's current prediction preserving prior events and exits nonzero without echoing input values or paths. A completed abstention or explicit `not_run` remains visible; a zero exit code does not establish accuracy, calibration or study readiness.
 
-Deferred: execute meaningful boundary/prefix/error tests; validate warm-up/EMA and event
-timing against independently authored cases; add geometry/side selection and full source
-contracts; wire A2-H gates/window summaries; add all other arms, calibration, custody,
-privacy enforcement and reports. No model downloads, camera, real-data or device work,
-installs, runtime tests, network calls, spend, keys, or pushes occurred in this milestone.
-This counter supplies no form, medical, exercise-safety or coaching judgment.
+The core/source CLI uses stdlib source. Python 3.12/package installation/wheel compatibility and any later optional runtime dependencies are unverified. No lockfile/environment/CI/Docker deployment was constructed during Dirty Mode. No public license/model rights or fixture publication is inferred.
+
+Remaining construction/validation: calibration/tuning/LOPO and custody/labels/admission, metrics/statistics/reporting, live timing/device/operator acceptance, actual human rights/corpus/independence and a custodian-run held-out edition. Some of those source packages may be concurrently in progress in other branches; only integrated source is described here. All runtime boundary/prefix/numeric/privacy/bridge/CLI behavior, device EOF/offline/denial/release and independent human checks remain deferred. No installs/tests/runtime/network/models/private data/spend/keys/push/publication/deletes occurred in this CLI package.

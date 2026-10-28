@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pose-feedback-calibration"
 version = "0.1.0"
-description = "Source-only causal squat event and numeric evidence foundation"
+description = "Source-only bounded development landmark, geometry and counter pipeline"
 requires-python = ">=3.12"
 dependencies = []
 
