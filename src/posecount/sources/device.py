@@ -21,6 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..landmarks import FrameBatch, LANDMARK_NAMES, Landmark, SourceError, StreamValidator
+from ..latency import ClockAnchor, anchor_now
 from ..privacy import PrivacyPolicy
 from ..windows import missing_between, nominal_slot
 
@@ -33,6 +34,30 @@ class DeviceAuthorization:
     operator_rights_confirmed: bool = False
     offline_confirmed: bool = False
     private_data_confirmed: bool = False
+
+
+@dataclass(frozen=True)
+class DeviceReadReceipt:
+    """Landmarks and optional reached-stage anchors, never raw preview pixels.
+
+    None from read_receipt means clean EOF. A failed receipt has batch=None and
+    a closed SourceError reason. Backend queue losses remain unobservable/null.
+    """
+
+    batch: FrameBatch | None
+    capture_return: ClockAnchor | None = None
+    preprocess: ClockAnchor | None = None
+    inference: ClockAnchor | None = None
+    failure_reason: str | None = None
+    dropped_since_read: None = None
+    overwritten_since_read: None = None
+
+
+def _authorized(value: DeviceAuthorization | None) -> bool:
+    return isinstance(value, DeviceAuthorization) and all(v is True for v in (
+        value.processing_authorized, value.operator_rights_confirmed,
+        value.offline_confirmed, value.private_data_confirmed,
+    ))
 
 
 def _fail(reason: str) -> SourceError:
@@ -135,10 +160,13 @@ class VideoSource:
         privacy: PrivacyPolicy,
         authorization: DeviceAuthorization,
         pixel_aspect: float,
+        preview_authorized: bool = False,
     ) -> None:
         if (type(pixel_aspect) not in (int, float) or
                 not 0 < pixel_aspect <= 100 or not math.isfinite(pixel_aspect)):
             raise _fail("invalid_pixel_aspect")
+        if type(preview_authorized) is not bool:
+            raise _fail("invalid_preview_authorization")
         self.path = path
         self.manifest = manifest
         self.privacy = privacy
@@ -161,6 +189,14 @@ class VideoSource:
         self._expected_frames: int | None = None
         self._expected_endpoint: float | None = None
         self._decoded_frames = 0
+        self._preview_authorized = preview_authorized
+        self._preview: Any = None
+        self._preview_batch: FrameBatch | None = None
+        self._open_authorization: DeviceAuthorization | None = None
+        self._timing_enabled = False
+        self._capture_return: ClockAnchor | None = None
+        self._preprocess: ClockAnchor | None = None
+        self._inference: ClockAnchor | None = None
 
     def _evidence(self) -> tuple[Path, dict[str, Any], dict[str, float]]:
         auth = self.authorization
@@ -234,6 +270,7 @@ class VideoSource:
         self._open_attempted = True
         try:
             model, pins, thresholds = self._evidence()
+            self._open_authorization = self.authorization
             target: str | int
             if self._camera is None:
                 target = str(self.privacy.validate(self.path))
@@ -289,8 +326,13 @@ class VideoSource:
         except Exception as exc:
             self._close_on_error()
             raise _fail("device_open_unavailable") from exc
+        except BaseException:
+            self._close_on_error()
+            raise
 
     def read(self) -> FrameBatch | None:
+        self._clear_preview()
+        self._capture_return = self._preprocess = self._inference = None
         if self._capture is None:
             raise _fail("source_not_open")
         try:
@@ -298,6 +340,8 @@ class VideoSource:
             # device exposure timestamp; receive time is captured separately.
             sampled_ns = time.monotonic_ns()
             ok, decoded = self._capture.read()
+            if self._timing_enabled:
+                self._capture_return = anchor_now()
             received = time.monotonic_ns()
             if not ok:
                 if self._camera is not None:
@@ -348,7 +392,11 @@ class VideoSource:
                 raise _fail("source_timestamp_not_increasing")
             rgb = self._cv2.cvtColor(decoded, self._cv2.COLOR_BGR2RGB)
             image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+            if self._timing_enabled:
+                self._preprocess = anchor_now()
             result = self._landmarker.detect_for_video(image, timestamp_ms)
+            if self._timing_enabled:
+                self._inference = anchor_now()
             if len(result.pose_landmarks) > 2:
                 raise _fail("runtime_pose_count_invalid")
             poses = []
@@ -378,6 +426,12 @@ class VideoSource:
             batch = self._validator.accept(batch)
             self._previous_media = t_media
             self._last_ms = timestamp_ms
+            if self._preview_authorized:
+                if (not _authorized(self.authorization)
+                        or not _authorized(self._open_authorization)
+                        or not self.privacy.boundaries_verified):
+                    raise _fail("preview_authorization_required")
+                self._preview, self._preview_batch = decoded, batch
             return batch
         except SourceError:
             self._close_on_error()
@@ -385,6 +439,60 @@ class VideoSource:
         except Exception as exc:
             self._close_on_error()
             raise _fail("device_read_failed") from exc
+        except BaseException:
+            # Interruptions cannot leave the current raw preview retained.
+            self._close_on_error()
+            raise
+
+    def read_receipt(self) -> DeviceReadReceipt | None:
+        """Opt into genuine host anchors while retaining legacy read semantics.
+
+        SourceErrors become failed receipts only in this optional method; read()
+        continues to raise as before. Reached anchors survive the error close.
+        Neither API estimates driver drop/overwrite counts.
+        """
+        self._timing_enabled = True
+        try:
+            try:
+                batch = self.read()
+            except SourceError as exc:
+                return DeviceReadReceipt(None, self._capture_return,
+                    self._preprocess, self._inference, exc.reason)
+            if batch is None:
+                return None
+            return DeviceReadReceipt(batch, self._capture_return,
+                self._preprocess, self._inference)
+        finally:
+            self._timing_enabled = False
+
+    def _clear_preview(self) -> None:
+        self._preview = None
+        self._preview_batch = None
+
+    def consume_preview(self, batch: FrameBatch, *, authorization: DeviceAuthorization) -> Any:
+        """One authorized transfer to the trusted local renderer, never a getter.
+
+        An exact current successful batch object is required, along with current
+        and opening authorization and the separately supplied operator assertion.
+        Every request consumes/clears the slot, including a refused/stale request.
+        A trusted renderer must not retain pixels, log or write them elsewhere.
+        """
+        try:
+            if (not self._preview_authorized or self._capture is None
+                    or not _authorized(authorization)
+                    or not _authorized(self.authorization)
+                    or not _authorized(self._open_authorization)
+                    or not self.privacy.boundaries_verified):
+                raise _fail("preview_authorization_required")
+            expected = self._preview_batch
+            if (not isinstance(batch, FrameBatch) or batch is not expected
+                    or self._preview is None or batch.t_media != self._previous_media
+                    or batch.source_kind != ("camera" if self._camera is not None else "video")
+                    or batch.source_id != ("local-camera" if self._camera is not None else "local-video")):
+                raise _fail("preview_batch_mismatch")
+            return self._preview
+        finally:
+            self._clear_preview()
 
     def _close_on_error(self) -> None:
         # Preserve the original named failure while attempting both releases.
@@ -394,6 +502,8 @@ class VideoSource:
             pass
 
     def close(self) -> None:
+        self._clear_preview()
+        self._open_authorization = None
         self._open_attempted = True
         capture, landmarker = self._capture, self._landmarker
         self._capture = self._landmarker = None
@@ -426,10 +536,12 @@ class CameraSource(VideoSource):
     def __init__(
         self, index: int, *, manifest: Path, privacy: PrivacyPolicy,
         authorization: DeviceAuthorization, pixel_aspect: float,
+        preview_authorized: bool = False,
     ) -> None:
         super().__init__(
             Path("."), manifest=manifest, privacy=privacy, authorization=authorization,
             pixel_aspect=pixel_aspect,
+            preview_authorized=preview_authorized,
         )
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise _fail("camera_index_invalid")

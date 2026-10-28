@@ -9,7 +9,9 @@ joins the existing LandmarkSource, GeometryAdapter, attach_evidence and Counter.
 Neither implements inference or new geometry. Optional OpenCV is imported lazily
 inside the future renderer, with no acquisition. A trusted `image_for(batch,state)`
 callback supplies an approved local image; existing FrameBatch contains landmarks,
-not raw pixels. A real camera preview therefore still requires operator wiring.
+not raw pixels. The guarded run_device_session wrapper now connects an optional
+single-frame device preview; see source-device-live.md. Operator admission and
+all actual preview/runtime/device validation remain pending.
 
 ## Span and aggregate seam
 
@@ -39,9 +41,11 @@ phase, phase_reason, anchors, stages. Geometry warmup replay creates no historic
 host render observations; its counter work contributes only to the current frame.
 Existing device.receive_ns uses monotonic_ns and a separate source UUID: this
 controller deliberately does not relabel it as its own perf_counter anchor.
-Existing source adapters provide no preprocessing/inference timing callbacks.
-Their capture, preprocess and inference anchors therefore remain absent. Source
-read completion occurs after inference and cannot supply a capture anchor.
+Generic read() provides no preprocessing/inference timing callbacks. Its capture,
+preprocess and inference anchors therefore remain absent. The optional existing
+device adapter now offers genuine stage receipts consumed by run_device_session;
+see source-device-live.md. Source read completion occurs after inference and cannot
+supply a capture anchor.
 
 `SpanWriter(max_samples=7201).append(span)` retains the first bounded samples.
 `record_drop(count)`/`record_overwrite(count)` record caller declarations only.
@@ -134,6 +138,7 @@ it does not rewrite immutable Event.t_display/media timestamps or prove photons.
 `SessionResult` fields: status, stop_reason, prediction, emitted_events,
 presentations, source_frames, processed_frames, source_unavailable_slots,
 backend_dropped, backend_overwritten, slot_overwritten, controller_dropped,
+failed_source_reads (instrumented failed attempts without an accepted batch),
 cleanup_errors, timing, initialization_ms, initialization_reason. The aggregate
 includes status/stop_reason, prediction_status/final_count, provisional_count,
 presentation_receipts, frame/count fields, backend_counts_reason,
