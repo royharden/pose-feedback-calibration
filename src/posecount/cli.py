@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 
 from .counter import Counter
-from .geometry import GeometryAdapter
-from .schema import AngleFrame, CounterConfig, attach_evidence
+from .pipeline import (
+    CounterRequest, SourceAdmission, SourceResult, development_aggregate,
+    run_source, write_development_aggregate, write_unmeasured_report,
+)
+from .schema import AngleFrame, CounterConfig
 from .sources.fixture import FixtureSource
 from .sources.synthetic import DevelopmentConfig, SyntheticSource, NEGATIVES, PERTURBATIONS
 
@@ -29,21 +32,15 @@ def _scalar(path: Path, counter: Counter) -> None:
             counter.update(AngleFrame(**row))
 
 
-def _landmarks(source: FixtureSource | SyntheticSource, counter: Counter) -> None:
-    """Do not round media times or attach scored movement to replayed warmup."""
-    adapter = GeometryAdapter()
-    try:
-        if isinstance(source, FixtureSource):
-            source.open()
-        while (batch := source.read()) is not None:
-            for output in adapter.update(batch):
-                values = output.bridge_kwargs()
-                frame = output.angle_frame if values is None else attach_evidence(
-                    output.angle_frame, **values)
-                counter.update(frame)
-        adapter.finish()
-    finally:
-        source.close()
+def _landmarks(args: argparse.Namespace, request: CounterRequest) -> SourceResult:
+    """Construct input inside the shared error boundary, after admission."""
+    def factory() -> FixtureSource | SyntheticSource:
+        if args.landmarks is not None:
+            return FixtureSource(args.landmarks, development_only=True).open()
+        return SyntheticSource(DevelopmentConfig(
+            args.generate_development, perturbation=args.perturbation,
+            strength=args.strength, negative=args.negative))
+    return run_source(factory, (request,), admission=SourceAdmission("development"))
 
 
 def main() -> None:
@@ -63,6 +60,10 @@ def main() -> None:
     parser.add_argument("--perturbation", choices=PERTURBATIONS)
     parser.add_argument("--strength", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--negative", choices=NEGATIVES)
+    parser.add_argument("--development-report", type=Path, metavar="NEW_JSON",
+                        help="Exclusive aggregate-only JSON export; no truth metrics or study claim")
+    parser.add_argument("--unmeasured-report", type=Path, metavar="NEW_DIRECTORY",
+                        help="Empty unmeasured report via actual report API, when integrated")
     args = parser.parse_args()
     if args.generate_development is None and (
         args.perturbation is not None or args.negative is not None or args.strength != 1
@@ -80,33 +81,55 @@ def main() -> None:
     except (ValueError, TypeError, OverflowError):
         parser.error("invalid development counter configuration")
     failed = False
+    source_result = None
     try:
         if args.synthetic is not None:
             _scalar(args.synthetic, counter)
-        elif args.landmarks is not None:
-            _landmarks(FixtureSource(args.landmarks, development_only=True), counter)
         else:
-            source = SyntheticSource(DevelopmentConfig(
-                args.generate_development, perturbation=args.perturbation,
-                strength=args.strength, negative=args.negative))
-            _landmarks(source, counter)
+            source_result = _landmarks(args, CounterRequest(args.arm, config))
+            failed = source_result.source_status == "error"
     except (OSError, ValueError, TypeError, OverflowError, RecursionError):
         failed = True
         counter.source_error()
-    prediction = counter.finish()
+    prediction = counter.finish() if source_result is None else source_result.predictions[0]
     payload = asdict(prediction)
-    if args.synthetic is None:
-        payload["development_context"] = {
-            "provenance": "builder-authored development input; declaration is not proof of rights",
-            "runtime_verified": False,
-            "study_admitted": False,
-            "policy": "manual development ranking" if args.visibility_threshold is not None else "unselected",
-        }
+    source_class = ("development_scalar" if args.synthetic is not None else
+                    "development_landmarks" if args.landmarks is not None else "development_generated")
+    payload["development_context"] = {
+        "source_class": source_class,
+        "provenance": "builder-authored development input; declaration is not proof of rights",
+        "runtime_verified": False,
+        "study_admitted": False,
+        "policy": "manual development ranking" if args.visibility_threshold is not None else "unselected",
+    }
+    if source_result is not None:
+        payload["source_status"] = source_result.source_status
+        payload["cleanup_status"] = source_result.cleanup_status
+    report_failed = False
+    if args.development_report is not None:
+        try:
+            write_development_aggregate(args.development_report,
+                                        development_aggregate(prediction, source_class=source_class))
+        except (OSError, ValueError, TypeError):
+            report_failed = True
+            payload["report_status"] = "output_error"
+        else:
+            payload["report_status"] = "written_development_aggregate"
+    if args.unmeasured_report is not None:
+        try:
+            status = write_unmeasured_report(args.unmeasured_report)
+            payload["unmeasured_report_status"] = status
+            report_failed |= status != "written_unmeasured_report"
+        except (OSError, ValueError, TypeError):
+            report_failed = True
+            payload["unmeasured_report_status"] = "output_error"
     print(json.dumps(payload, allow_nan=False))
     if failed:
         parser.exit(2, "source_error: development input failed; earlier events preserved\n")
     if prediction.status == "error":
         parser.exit(2)
+    if report_failed:
+        parser.exit(2, "output_error: aggregate export failed\n")
 
 
 if __name__ == "__main__":
