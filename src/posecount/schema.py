@@ -32,6 +32,11 @@ class Reason(StrEnum):
     VISIBILITY_POLICY = "visibility_below_threshold"
     ELBOW_INPUTS = "elbow_inputs_missing"
     EVIDENCE_UNAVAILABLE = "evidence_metadata_unavailable"
+    NO_CURRENT_INPUT = "no_current_input"
+    WARMUP = "warmup"
+    STALE_INPUT = "stale_input"
+    SCORING_CLOSED = "scored_window_closed"
+    COUNTER_FINISHED = "counter_finished"
 
 
 def reason_message(reason: Reason) -> str:

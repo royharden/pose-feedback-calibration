@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import asdict, replace
 from hashlib import sha256
 import json
-from math import exp
+from math import exp, isfinite
 from statistics import median
 
 from .features import EvidenceTracker, consistency, quality
@@ -31,6 +31,7 @@ class A1Counter:
         self._events: list[Event] = []
         self._reasons: list[Reason] = []
         self._error = False
+        self._source_failure: Reason | None = None
         self._scored = 0
         self._frames = 0
         self._candidates = 0
@@ -40,6 +41,8 @@ class A1Counter:
         if reason not in self._reasons:
             self._reasons.append(reason)
         self._error |= error
+        if error and self._source_failure is None:
+            self._source_failure = reason
 
     def _reset(self) -> None:
         self._start = None
@@ -209,6 +212,8 @@ class HardGatedCounter(A1Counter):
         self.hard_gate = False
         self._g: float | None = None
         self._poses = 1
+        self._hard_reason: Reason | None = None
+        self._gate_reason_current: Reason | None = None
 
     def _reason(self, reason: Reason, error: bool = False) -> None:
         if reason == Reason.SOURCE_GAP:
@@ -218,6 +223,9 @@ class HardGatedCounter(A1Counter):
             reason = Reason.SECOND_PERSON
             self.hard_gate = True
             error = False
+        if reason in {Reason.SOURCE_GAP, Reason.SECOND_PERSON, Reason.REQUIRED_VISIBILITY}:
+            if self._hard_reason is None:
+                self._hard_reason = reason
         super()._reason(reason, error)
 
     def source_error(self, reason: Reason = Reason.SOURCE_ERROR) -> None:
@@ -225,6 +233,7 @@ class HardGatedCounter(A1Counter):
         self.evidence.reset_motion()
 
     def _observe(self, frame: AngleFrame, gap: bool) -> None:
+        self._gate_reason_current = None
         self._poses = frame.poses
         if gap:
             self.evidence.reset_motion()
@@ -246,11 +255,14 @@ class HardGatedCounter(A1Counter):
 
     def _may_process(self, frame: AngleFrame) -> bool:
         if self.hard_gate or self._error:
+            self._gate_reason_current = self._source_failure or self._hard_reason or Reason.SOURCE_ERROR
             return False
         if self._g is None:
-            self._reason(frame.evidence_reason or Reason.MOVEMENT_INPUTS)
+            self._gate_reason_current = frame.evidence_reason or Reason.MOVEMENT_INPUTS
+            self._reason(self._gate_reason_current)
             return False
         if self._g < self.config.movement_threshold:
+            self._gate_reason_current = Reason.MOVEMENT_LOW
             self._reason(Reason.MOVEMENT_LOW)
             return False
         return True
@@ -263,6 +275,7 @@ class HardGatedCounter(A1Counter):
             self.source_error(Reason.EXPECTED_FRAMES)
             return None
         if q < self.config.q_threshold:
+            self._gate_reason_current = Reason.QUALITY_LOW
             self._reason(Reason.QUALITY_LOW)
             return None
         return replace(event, vis=vis, gapfree=gap, q=q)
@@ -288,6 +301,7 @@ class HysteresisCounter:
         self._events: list[Event] = []
         self._reasons: list[Reason] = []
         self._error = False
+        self._source_failure: Reason | None = None
         self._visibility: list[float] = []
         self._finished: Prediction | None = None
 
@@ -301,6 +315,8 @@ class HysteresisCounter:
         if reason not in self._reasons:
             self._reasons.append(reason)
         self._error = True
+        if self._source_failure is None:
+            self._source_failure = reason
         self._reset()
 
     def update(self, frame: AngleFrame) -> tuple[Event, ...]:
@@ -426,6 +442,10 @@ class Counter:
         else:
             self._core = self._raw
         self._finished: Prediction | None = None
+        self._latest_scalar: AngleFrame | None = None
+        self._gate_time: float | None = None
+        self._gate_signature: tuple[object, ...] | None = None
+        self._current_gate_reason: Reason | None = Reason.NO_CURRENT_INPUT
 
     def source_error(self, reason: Reason = Reason.SOURCE_ERROR) -> None:
         if self._finished is not None:
@@ -434,6 +454,75 @@ class Counter:
         self._raw.source_error(reason)
         if self._core is not self._raw:
             self._core.source_error(reason)
+        self._current_gate_reason = self._core._source_failure or (
+            self._core._hard_reason if isinstance(self._core, HardGatedCounter) else None
+        ) or reason
+
+    def _record_current_gate(self, frame: AngleFrame) -> None:
+        """Called only by update, after actual filtering; never recompute evidence."""
+        self._latest_scalar = frame
+        self._gate_signature = None
+        if self._core._source_failure is None:
+            try:
+                self._gate_signature = (frame.t_media, frame.theta, tuple(frame.visibility), frame.poses,
+                                        frame.evidence, frame.evidence_reason)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        time = frame.t_media
+        try:
+            self._gate_time = time if type(time) in (int, float) and isfinite(time) else None
+        except (TypeError, ValueError, OverflowError):
+            self._gate_time = None
+        if self._core._source_failure is not None:
+            reason = self._core._source_failure
+        elif self._gate_time is None:
+            reason = Reason.INVALID_INPUT
+        elif self._gate_time < 3:
+            reason = Reason.WARMUP
+        elif self.arm == "A2":
+            reason = Reason.CALIBRATION_UNAVAILABLE
+        elif self.arm == "A0v" and self.config.visibility_threshold is None:
+            reason = Reason.POLICY_UNAVAILABLE
+        elif isinstance(self._core, HardGatedCounter) and self._core.hard_gate:
+            reason = self._core._hard_reason or Reason.SOURCE_ERROR
+        elif isinstance(self._core, HardGatedCounter) and self._core._gate_reason_current is not None:
+            reason = self._core._gate_reason_current
+        elif self._gate_time >= 30 and (self.arm == "Z" or (
+            self._core._pending is None if isinstance(self._core, A1Counter) else self._core._return is None
+        )):
+            reason = Reason.SCORING_CLOSED
+        else:
+            reason = None
+        self._current_gate_reason = reason
+
+    def gate_reason(self, latest_scalar: AngleFrame) -> Reason | None:
+        """Read-only current gate for the EXACT processed scalar object/time.
+
+        None is current gate-open only: not a promise of a future retained rep,
+        final answer, calibrated confidence or native/device success.
+        """
+        if type(latest_scalar) is not AngleFrame:
+            return Reason.INVALID_INPUT
+        if self._latest_scalar is None:
+            return self._core._source_failure or self._current_gate_reason or Reason.NO_CURRENT_INPUT
+        if latest_scalar is not self._latest_scalar:
+            return Reason.STALE_INPUT
+        if self._core._source_failure is not None:
+            return self._core._source_failure
+        if self._gate_time is None:
+            return self._current_gate_reason or Reason.INVALID_INPUT
+        if latest_scalar.t_media != self._gate_time:
+            return Reason.STALE_INPUT
+        try:
+            signature = (latest_scalar.t_media, latest_scalar.theta, tuple(latest_scalar.visibility),
+                         latest_scalar.poses, latest_scalar.evidence, latest_scalar.evidence_reason)
+            if self._gate_signature is None or signature != self._gate_signature:
+                return Reason.STALE_INPUT
+        except (TypeError, ValueError, OverflowError):
+            return Reason.STALE_INPUT
+        if self._finished is not None:
+            return self._core._source_failure or Reason.COUNTER_FINISHED
+        return self._current_gate_reason
 
     def update(self, frame: AngleFrame) -> tuple[Event, ...]:
         if self._finished is not None:
@@ -450,6 +539,7 @@ class Counter:
             self._core._durations = deque(self._raw._durations, maxlen=5)
         raw_events = self._raw.update(frame)
         events = raw_events if self._core is self._raw else self._core.update(frame)
+        self._record_current_gate(frame)
         if self.arm in {"Z", "A2"} or (
             self.arm == "A0v" and self.config.visibility_threshold is None
         ):
@@ -501,3 +591,10 @@ class Counter:
                              features=None if summary is None else summary.vector())
         self._finished = result
         return result
+
+
+def counter_gate_reason(counter: Counter, latest_scalar: AngleFrame) -> Reason | None:
+    """Public P9 callback; no finishing, filtering, mutation or private consumers."""
+    if type(counter) is not Counter:
+        return Reason.INVALID_INPUT
+    return counter.gate_reason(latest_scalar)

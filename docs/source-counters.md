@@ -1,5 +1,34 @@
 # Scalar counter construction — runtime unverified
 
+## Public current gate callback (P9 reconciliation)
+
+Import posecount.counter.counter_gate_reason(counter:Counter,latest_scalar:AngleFrame)
+-> Reason|None, or counter.gate_reason(latest_scalar). Pass the EXACT scalar object
+most recently passed to this counter.update(), including its attached evidence.
+Equivalent copies and stale/replayed earlier frames close as stale_input. The owner
+checks object identity, media time and a snapshot of scalar/evidence values (including
+legacy mutable visibility sequences). Wrong types fail as invalid_input. No query
+calls finish(), changes state, replays frames, computes movement/q or applies a filter.
+
+Normal update/source_error paths cache the current decision from already-computed
+state. No input -> no_current_input; first3s -> warmup; source-invalid -> its first
+sticky source Reason. A2 missing map -> calibration_unavailable; A0v missing policy
+-> visibility_policy_unavailable. A2-H exposes actual current movement/missing-input
+closure, current-frame q rejection and sticky hard-latch Reason; a later valid
+movement sample does not erase a hard/source failure. A transient q rejection belongs
+only to its processed frame; a later frame can open current movement checks without
+promising that its next candidate will pass q. No final-window score/probability or
+prospective q is invented. None means CURRENT gate open, not a retained future rep,
+final answer or camera/native success. Legacy A1/A0/Z still need no A2-H metadata.
+
+After30s no new candidate gate opens; tail is open only while an existing eligible
+non-Z return awaits confirmation. Otherwise scored_window_closed; after explicit
+finish, counter_finished or an already recorded source-error Reason. Query itself
+never finishes. Existing emissions, counts, filters, references and final decisions
+are unchanged by this observation-only seam. The live wrapper can use exactly this
+callback; no consumer should inspect private counter state or copy its gate math.
+Source integration/identity/repeated-query/no-mutation behavior remains unexecuted.
+
 Original source under Roy's 2026-10-28 resumed Dirty Mode grant. Human admission,
 G0/G1, historical pre-G0 ordering, real-data/model/runtime rights and independent
 study execution remain pending. No runtime/import/test/device/model execution occurred.
