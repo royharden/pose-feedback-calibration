@@ -146,6 +146,377 @@ class WordingDisposition:
     nonbuilder_receipt: str | None
 
 
+TIMING_STAGES = ("preprocess_ms", "inference_ms", "counter_update_ms", "render_ms", "capture_to_render_ms")
+TIMING_PHASES = ("init_warmup", "steady_state", "unclassified")
+TIMING_UNKNOWN_REASONS = frozenset((
+    "missing_anchor invalid_anchor missing_time nonfinite_time invalid_nanoseconds clock_domain_mismatch "
+    "missing_clock_scope invalid_clock_scope clock_scope_mismatch reversed_time nonfinite_duration unknown"
+).split())
+SESSION_STOP_REASONS = frozenset((
+    "end_of_stream operator_stop session_deadline session_deadline_after_read session_deadline_after_render "
+    "renderer_stop frame_limit interrupted session_not_authorized invalid_session_source_kind "
+    "real_processing_receipts_missing camera_unavailable camera_read_failed device_open_unavailable "
+    "device_read_failed session_source_kind_mismatch invalid_read_receipt invalid_render_receipt "
+    "session_clock_invalid invalid_backend_frame_count standing_reference_unavailable source_failed "
+    "session_failed cleanup_failed"
+).split())
+SESSION_COUNTS = frozenset((
+    "final_count provisional_count presentation_receipts source_frames processed_frames source_unavailable_slots "
+    "backend_dropped backend_overwritten slot_overwritten controller_dropped failed_source_reads"
+).split())
+DEVICE_COUNTS = frozenset(("cpu_cores",))
+DEVICE_NUMBERS = frozenset(("ram_gib",))
+DEVICE_ASSERTIONS = frozenset(("physical_distinctness_verified", "cpu_delegate_confirmed", "python312_deviation", "supported"))
+DEVICE_DIGESTS = frozenset((
+    "cpu_description_sha256 runtime_sha256 model_sha256 configuration_sha256 deviation_receipt_sha256 rights_receipt_sha256"
+).split())
+RECEIPT_COUNTS = frozenset(("actual_width", "actual_height", "source_frames", "processed_frames", "dropped_frames", "overwritten_frames"))
+RECEIPT_NUMBERS = frozenset(("actual_duration_s", "actual_source_fps", "actual_processed_fps", "initialization_ms", "offline_fps"))
+RECEIPT_ASSERTIONS = frozenset((
+    "permission_denial_observed invalid_index_observed no_retry_spin_observed stop_release_observed "
+    "second_app_open_observed prior_settings_restored_observed offline_verified_observed supported"
+).split())
+
+
+@dataclass(frozen=True)
+class TimingObservation:
+    source_kind: str
+    source_sha256: str
+    status: str
+    operator_receipt_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class PublicTimingStage:
+    name: str
+    unit: str
+    valid_count: int
+    unknown_count: int
+    unknown_reasons: tuple[tuple[str, int], ...]
+    p50: float | None
+    p95: float | None
+    p99: float | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class PublicTimingPhase:
+    name: str
+    span_count: int
+    stages: tuple[PublicTimingStage, ...]
+
+
+@dataclass(frozen=True)
+class PublicTimingSummary:
+    clock_domain: str
+    measurement_boundary: str
+    photon_latency_ms: None
+    photon_reason: str
+    steady_state_excludes_first_s: int
+    sample_limit: int
+    received_spans: int
+    retained_spans: int
+    sample_overflow: int
+    quantile_population: str
+    reported_dropped_frames: int | None
+    reported_overwritten_frames: int | None
+    drop_accounting: str
+    phases: tuple[PublicTimingPhase, ...]
+
+
+@dataclass(frozen=True)
+class PublicObservationValue:
+    name: str
+    value: float | int | None
+
+
+@dataclass(frozen=True)
+class PublicAssertion:
+    name: str
+    value: bool | None
+
+
+@dataclass(frozen=True)
+class PublicSessionTiming:
+    status: str
+    stop_reason: str
+    prediction_status: str
+    counts: tuple[PublicObservationValue, ...]
+    backend_counts_reason: str | None
+    cleanup_errors: tuple[str, ...]
+    initialization_ms: float | None
+    initialization_reason: str | None
+    timing_boundary: str
+    sensor_exposure_ms: None = None
+    display_photon_ms: None = None
+    live_stream_parity: None = None
+
+
+@dataclass(frozen=True)
+class PublicDeviceSession:
+    session_number: int
+    requested_duration_s: int
+    observations: tuple[PublicObservationValue, ...]
+    assertions: tuple[PublicAssertion, ...]
+    offline_receipt_sha256: str | None
+
+
+@dataclass(frozen=True)
+class PublicDeviceProfile:
+    machine_slot: str
+    requested_width: int
+    requested_height: int
+    os_family: str | None
+    python_version: tuple[int, int, int] | None
+    observations: tuple[PublicObservationValue, ...]
+    assertions: tuple[PublicAssertion, ...]
+    digests: tuple[tuple[str, str | None], ...]
+    sessions: tuple[PublicDeviceSession, ...]
+    observation_status: str
+    receipt_trust_limit: str
+
+
+@dataclass(frozen=True)
+class PublicDeviceProtocol:
+    heading: str
+    status: str
+    physical_distinctness: None
+    devices: tuple[PublicDeviceProfile, ...]
+
+
+@dataclass(frozen=True)
+class PublicTimingReport:
+    schema_version: int
+    observation: TimingObservation
+    summary: PublicTimingSummary
+    session: PublicSessionTiming | None
+    device_protocol: PublicDeviceProtocol
+
+
+def _bounded_count(value: object, *, maximum: int = 1_000_000) -> bool:
+    return _count(value) and value <= maximum
+
+
+def _observations(values: tuple[PublicObservationValue, ...], counts: frozenset[str],
+                  numbers: frozenset[str], *, nullable: frozenset[str] | None = None) -> dict[str, float | int | None]:
+    if type(values) is not tuple or any(type(v) is not PublicObservationValue for v in values):
+        raise ValueError("immutable_timing_observations_required")
+    result = {v.name: v.value for v in values}
+    if len(result) != len(values) or set(result) != counts | numbers:
+        raise ValueError("unknown_or_missing_timing_observation")
+    for name, value in result.items():
+        if value is None:
+            if nullable is not None and name not in nullable:
+                raise ValueError("required_timing_count_missing")
+        elif name in counts:
+            if not _bounded_count(value):
+                raise ValueError("invalid_timing_count")
+        elif not _finite(value) or not 0 <= value <= 1_000_000_000:
+            raise ValueError("invalid_timing_measurement")
+    return result
+
+
+def _assertions(values: tuple[PublicAssertion, ...], names: frozenset[str]) -> bool:
+    if type(values) is not tuple or any(type(v) is not PublicAssertion for v in values):
+        raise ValueError("immutable_operator_assertions_required")
+    if len({v.name for v in values}) != len(values) or {v.name for v in values} != names:
+        raise ValueError("unknown_or_missing_operator_assertion")
+    if any(v.value is not None and type(v.value) is not bool for v in values):
+        raise ValueError("invalid_operator_assertion")
+    return any(v.value is not None for v in values)
+
+
+def validate_timing_report(value: PublicTimingReport) -> None:
+    if type(value) is not PublicTimingReport or type(value.schema_version) is not int or value.schema_version != 1:
+        raise ValueError("typed_timing_schema_v1_required")
+    observation = value.observation
+    if (type(observation) is not TimingObservation
+            or observation.source_kind not in {"span_writer_summary", "session_result_aggregate"}
+            or not _sha(observation.source_sha256)
+            or observation.status not in {"unmeasured", "incomplete", "operator_reported"}
+            or (observation.operator_receipt_sha256 is not None and not _sha(observation.operator_receipt_sha256))):
+        raise ValueError("invalid_timing_source_observation")
+    if observation.status != "unmeasured" and observation.operator_receipt_sha256 is None:
+        raise ValueError("timing_operator_receipt_required")
+    summary = value.summary
+    if (type(summary) is not PublicTimingSummary or summary.clock_domain != "process_monotonic_ns"
+            or summary.measurement_boundary != "capture_return_to_render_return_or_enqueue"
+            or summary.photon_latency_ms is not None or summary.photon_reason != "not_measured"
+            or type(summary.steady_state_excludes_first_s) is not int or summary.steady_state_excludes_first_s != 5
+            or not _bounded_count(summary.sample_limit, maximum=7201) or summary.sample_limit == 0):
+        raise ValueError("invalid_timing_boundary")
+    if (not all(_bounded_count(v) for v in (summary.received_spans, summary.retained_spans, summary.sample_overflow))
+            or summary.retained_spans > summary.sample_limit
+            or summary.received_spans != summary.retained_spans + summary.sample_overflow
+            or summary.quantile_population != ("first_bounded_samples" if summary.sample_overflow else "retained_samples")):
+        raise ValueError("invalid_timing_sample_accounting")
+    for count in (summary.reported_dropped_frames, summary.reported_overwritten_frames):
+        if count is not None and not _bounded_count(count):
+            raise ValueError("invalid_backend_count")
+    unknown_backend = summary.reported_dropped_frames is None or summary.reported_overwritten_frames is None
+    if summary.drop_accounting != ("source_backend_uninstrumented" if unknown_backend else "caller_reported_not_driver_verified"):
+        raise ValueError("invalid_backend_count_provenance")
+    if (type(summary.phases) is not tuple or any(type(p) is not PublicTimingPhase for p in summary.phases)
+            or tuple(p.name for p in summary.phases) != TIMING_PHASES
+            or any(not _bounded_count(p.span_count, maximum=7201) for p in summary.phases)
+            or sum(p.span_count for p in summary.phases) != summary.retained_spans):
+        raise ValueError("invalid_timing_phases")
+    for phase in summary.phases:
+        if (not _bounded_count(phase.span_count, maximum=7201) or type(phase.stages) is not tuple
+                or any(type(stage) is not PublicTimingStage for stage in phase.stages)
+                or tuple(stage.name for stage in phase.stages) != TIMING_STAGES):
+            raise ValueError("invalid_timing_phase_support")
+        for stage in phase.stages:
+            if (stage.unit != "ms" or not _bounded_count(stage.valid_count, maximum=7201)
+                    or not _bounded_count(stage.unknown_count, maximum=7201)
+                    or stage.valid_count + stage.unknown_count != phase.span_count
+                    or type(stage.unknown_reasons) is not tuple
+                    or any(type(pair) is not tuple or len(pair) != 2 for pair in stage.unknown_reasons)):
+                raise ValueError("invalid_stage_support")
+            reasons = dict(stage.unknown_reasons)
+            if (len(reasons) != len(stage.unknown_reasons) or any(name not in TIMING_UNKNOWN_REASONS
+                    or not _bounded_count(count, maximum=7201) or count == 0 for name, count in reasons.items())
+                    or sum(reasons.values()) != stage.unknown_count):
+                raise ValueError("invalid_stage_unknown_reasons")
+            quantiles = (stage.p50, stage.p95, stage.p99)
+            if stage.valid_count == 0:
+                if quantiles != (None, None, None) or stage.reason != "no_valid_samples":
+                    raise ValueError("empty_stage_requires_null_quantiles")
+            elif (stage.reason is not None or any(not _finite(q) or not 0 <= q <= 1_000_000_000 for q in quantiles)
+                  or not stage.p50 <= stage.p95 <= stage.p99):
+                raise ValueError("invalid_stage_quantiles")
+    has_observations = summary.received_spans != 0
+    session = value.session
+    if (observation.source_kind == "session_result_aggregate") != (session is not None):
+        raise ValueError("timing_source_kind_mismatch")
+    if session is not None:
+        if (type(session) is not PublicSessionTiming or session.status not in {"completed", "stopped", "timeout", "error"}
+                or session.stop_reason not in SESSION_STOP_REASONS
+                or session.prediction_status not in {"answered", "abstain", "error", "not_run", "calibration_unavailable"}
+                or session.backend_counts_reason not in {None, "source_backend_uninstrumented"}
+                or type(session.cleanup_errors) is not tuple
+                or len(session.cleanup_errors) > 2 or len(set(session.cleanup_errors)) != len(session.cleanup_errors)
+                or any(code not in {"renderer_close_failed", "source_close_failed"} for code in session.cleanup_errors)
+                or session.timing_boundary != "capture-return to imshow return/render enqueue only"
+                or any(v is not None for v in (session.sensor_exposure_ms, session.display_photon_ms, session.live_stream_parity))):
+            raise ValueError("invalid_session_aggregate")
+        counts = _observations(session.counts, SESSION_COUNTS, frozenset(),
+                               nullable=frozenset(("final_count", "backend_dropped", "backend_overwritten")))
+        if (counts["source_frames"] != counts["processed_frames"] + counts["controller_dropped"]
+                or summary.received_spans != counts["source_frames"] + counts["failed_source_reads"]
+                or counts["backend_dropped"] != summary.reported_dropped_frames
+                or counts["backend_overwritten"] != summary.reported_overwritten_frames
+                or session.backend_counts_reason != ("source_backend_uninstrumented" if unknown_backend else None)):
+            raise ValueError("session_frame_or_backend_accounting_mismatch")
+        if any(v is not None and v > 7201 for v in counts.values()):
+            raise ValueError("session_frame_count_limit")
+        if session.prediction_status != "answered" and counts["final_count"] is not None:
+            raise ValueError("nonanswer_session_count_must_be_null")
+        if session.prediction_status == "answered" and (counts["final_count"] is None
+                or counts["final_count"] > counts["provisional_count"]):
+            raise ValueError("answered_session_count_requires_emitted_support")
+        if session.initialization_ms is None:
+            if session.initialization_reason != "initialization_incomplete":
+                raise ValueError("missing_initialization_reason")
+        elif (not _finite(session.initialization_ms) or not 0 <= session.initialization_ms <= 1_000_000_000
+              or session.initialization_reason is not None):
+            raise ValueError("invalid_initialization_observation")
+        has_observations = True  # Even a failed session is not an unrun template.
+    protocol = value.device_protocol
+    if (type(protocol) is not PublicDeviceProtocol or protocol.heading != "2 devices, not a device survey"
+            or protocol.status != "unverified_not_run" or protocol.physical_distinctness is not None
+            or type(protocol.devices) is not tuple or len(protocol.devices) != 2
+            or any(type(device) is not PublicDeviceProfile for device in protocol.devices)
+            or tuple(device.machine_slot for device in protocol.devices) != ("device_1", "device_2")):
+        raise ValueError("invalid_two_device_protocol")
+    for device in protocol.devices:
+        if ((type(device.requested_width), type(device.requested_height)) != (int, int)
+                or (device.requested_width, device.requested_height) != (640, 480)
+                or device.os_family not in {None, "windows", "macos", "linux", "other"}
+                or device.observation_status != "unverified_operator_receipts"
+                or device.receipt_trust_limit != "assertions_and_digests_are_not_independent_verification"
+                or type(device.digests) is not tuple
+                or any(type(pair) is not tuple or len(pair) != 2 for pair in device.digests)):
+            raise ValueError("invalid_device_metadata")
+        observations = _observations(device.observations, DEVICE_COUNTS, DEVICE_NUMBERS)
+        if any(v is not None and v <= 0 for v in observations.values()):
+            raise ValueError("invalid_positive_device_measurement")
+        if device.python_version is not None and (type(device.python_version) is not tuple or len(device.python_version) != 3
+                or any(not _bounded_count(part, maximum=10000) for part in device.python_version)):
+            raise ValueError("invalid_python_version")
+        digests = dict(device.digests)
+        if len(digests) != len(device.digests) or set(digests) != DEVICE_DIGESTS or any(
+            digest is not None and not _sha(digest) for digest in digests.values()
+        ):
+            raise ValueError("invalid_device_receipt_commitment")
+        has_observations |= (_assertions(device.assertions, DEVICE_ASSERTIONS)
+                             or device.os_family is not None or device.python_version is not None
+                             or any(v is not None for v in (*observations.values(), *digests.values())))
+        if (type(device.sessions) is not tuple or any(type(s) is not PublicDeviceSession for s in device.sessions)
+                or any(type(s.session_number) is not int for s in device.sessions)
+                or tuple(s.session_number for s in device.sessions) != (1, 2, 3)):
+            raise ValueError("three_protocol_session_slots_required")
+        for receipt in device.sessions:
+            if type(receipt.requested_duration_s) is not int or receipt.requested_duration_s != 60:
+                raise ValueError("invalid_requested_session_duration")
+            values = _observations(receipt.observations, RECEIPT_COUNTS, RECEIPT_NUMBERS)
+            if any(values[name] == 0 for name in ("actual_width", "actual_height") if values[name] is not None):
+                raise ValueError("invalid_observed_dimensions")
+            if receipt.offline_receipt_sha256 is not None and not _sha(receipt.offline_receipt_sha256):
+                raise ValueError("invalid_offline_receipt")
+            has_observations |= (_assertions(receipt.assertions, RECEIPT_ASSERTIONS)
+                                 or any(v is not None for v in values.values()) or receipt.offline_receipt_sha256 is not None)
+    if observation.status == "unmeasured" and (has_observations
+            or summary.reported_dropped_frames not in (None, 0) or summary.reported_overwritten_frames not in (None, 0)):
+        raise ValueError("unmeasured_timing_cannot_contain_observations")
+    if timing_source_sha256(value) != observation.source_sha256:
+        raise ValueError("exact_timing_aggregate_source_seal_mismatch")
+
+
+def timing_source_sha256(value: PublicTimingReport) -> str:
+    """Canonical producer packet from a structurally validated immutable DTO.
+
+    Used by EVERY timing validation ingress, including JSON hydration/rendering;
+    never import the evaluator/producer or invoke a timing/device operation.
+    """
+    summary, protocol, session = value.summary, value.device_protocol, value.session
+    source_summary = asdict(summary)
+    source_summary["phases"] = {
+        phase.name: {"span_count": phase.span_count, "stages": {
+            stage.name: {name: item for name, item in asdict(stage).items() if name != "name"}
+            for stage in phase.stages
+        }} for phase in summary.phases
+    }
+    for phase in source_summary["phases"].values():
+        for stage in phase["stages"].values():
+            stage["unknown_reasons"] = dict(stage["unknown_reasons"])
+    source_devices = []
+    for device in protocol.devices:
+        raw = {name: getattr(device, name) for name in (
+            "machine_slot", "requested_width", "requested_height", "os_family", "python_version",
+            "observation_status", "receipt_trust_limit",
+        )}
+        raw.update((item.name, item.value) for item in (*device.observations, *device.assertions))
+        raw.update(device.digests)
+        raw["sessions"] = [{"session_number": receipt.session_number,
+                            "requested_duration_s": receipt.requested_duration_s,
+                            "offline_receipt_sha256": receipt.offline_receipt_sha256,
+                            **{item.name: item.value for item in (*receipt.observations, *receipt.assertions)}}
+                           for receipt in device.sessions]
+        source_devices.append(raw)
+    source_protocol = {"heading": protocol.heading, "status": protocol.status,
+                       "physical_distinctness": protocol.physical_distinctness, "devices": source_devices}
+    source_aggregate = source_summary
+    if session is not None:
+        source_aggregate = {name: item for name, item in asdict(session).items() if name != "counts"}
+        source_aggregate.update((item.name, item.value) for item in session.counts)
+        source_aggregate["timing"] = source_summary
+    packet = {"source_kind": value.observation.source_kind, "aggregate": source_aggregate,
+              "device_profiles": source_protocol}
+    return sha256(json.dumps(packet, sort_keys=True, allow_nan=False,
+                             separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ResultBundle:
     """Public aggregate DTO, containing no private row/label/path/name fields."""
@@ -160,6 +531,7 @@ class ResultBundle:
     calibration_attribution: bool = False
     device_state: str = "unmeasured"
     wording: tuple[WordingDisposition, ...] = ()
+    timing: PublicTimingReport | None = None
 
 
 def _metric(metric: PublicMetric) -> None:
@@ -183,6 +555,12 @@ def validate_bundle(bundle: ResultBundle) -> None:
         raise ValueError("invalid_source_seal")
     if bundle.state != "unmeasured" and bundle.source_seal is None:
         raise ValueError("measured_source_seal_required")
+    if bundle.timing is not None:
+        validate_timing_report(bundle.timing)
+        if bundle.timing.observation.status != "unmeasured" and (
+            bundle.state == "unmeasured" or bundle.device_state != "incomplete"
+        ):
+            raise ValueError("reported_timing_requires_explicit_incomplete_observation_state")
     if bundle.claim_category not in CLAIM_TEXT or bundle.device_state not in {"unmeasured", "incomplete"}:
         raise ValueError("unsupported_claim_or_device_state")
     if type(bundle.lower_error) is not bool or type(bundle.calibration_attribution) is not bool:
@@ -289,7 +667,12 @@ def validate_bundle(bundle: ResultBundle) -> None:
 
 def payload(bundle: ResultBundle) -> dict[str, object]:
     validate_bundle(bundle)
-    return asdict(bundle)
+    result = asdict(bundle)
+    # Absence is the original public schema/canonical identity. Merely upgrading
+    # the source must not change existing no-timing bundle hashes.
+    if bundle.timing is None:
+        result.pop("timing")
+    return result
 
 
 def canonical_json(bundle: ResultBundle) -> str:
@@ -325,7 +708,10 @@ def load_bundle_json(text: str, *, expected_bundle_hash: str) -> ResultBundle:
         return result
 
     def record(kind: type, value: object) -> dict[str, object]:
-        if type(value) is not dict or set(value) != {field.name for field in fields(kind)}:
+        names = {field.name for field in fields(kind)}
+        if kind is ResultBundle and type(value) is dict and set(value) == names - {"timing"}:
+            return {**value, "timing": None}  # Explicit original-schema compatibility.
+        if type(value) is not dict or set(value) != names:
             raise ValueError("unknown_or_missing_aggregate_json_field")
         return dict(value)
 
@@ -344,6 +730,54 @@ def load_bundle_json(text: str, *, expected_bundle_hash: str) -> ResultBundle:
 
     def metric(value: object) -> PublicMetric:
         return PublicMetric(**record(PublicMetric, value))
+
+    def observations(value: object) -> tuple[PublicObservationValue, ...]:
+        return tuple(PublicObservationValue(**record(PublicObservationValue, item)) for item in array(value))
+
+    def assertions(value: object) -> tuple[PublicAssertion, ...]:
+        return tuple(PublicAssertion(**record(PublicAssertion, item)) for item in array(value))
+
+    def timing_report(value: object) -> PublicTimingReport:
+        data = record(PublicTimingReport, value)
+        data["observation"] = TimingObservation(**record(TimingObservation, data["observation"]))
+        summary = record(PublicTimingSummary, data["summary"])
+        phases = []
+        for value_phase in array(summary["phases"]):
+            phase = record(PublicTimingPhase, value_phase)
+            stages = []
+            for value_stage in array(phase["stages"]):
+                stage = record(PublicTimingStage, value_stage)
+                stage["unknown_reasons"] = pairs(stage["unknown_reasons"])
+                stages.append(PublicTimingStage(**stage))
+            phase["stages"] = tuple(stages)
+            phases.append(PublicTimingPhase(**phase))
+        summary["phases"] = tuple(phases)
+        data["summary"] = PublicTimingSummary(**summary)
+        if data["session"] is not None:
+            session = record(PublicSessionTiming, data["session"])
+            session["counts"] = observations(session["counts"])
+            session["cleanup_errors"] = tuple(array(session["cleanup_errors"]))
+            data["session"] = PublicSessionTiming(**session)
+        protocol = record(PublicDeviceProtocol, data["device_protocol"])
+        devices = []
+        for value_device in array(protocol["devices"]):
+            device = record(PublicDeviceProfile, value_device)
+            if device["python_version"] is not None:
+                device["python_version"] = tuple(array(device["python_version"]))
+            device["observations"] = observations(device["observations"])
+            device["assertions"] = assertions(device["assertions"])
+            device["digests"] = pairs(device["digests"])
+            sessions = []
+            for value_session in array(device["sessions"]):
+                receipt = record(PublicDeviceSession, value_session)
+                receipt["observations"] = observations(receipt["observations"])
+                receipt["assertions"] = assertions(receipt["assertions"])
+                sessions.append(PublicDeviceSession(**receipt))
+            device["sessions"] = tuple(sessions)
+            devices.append(PublicDeviceProfile(**device))
+        protocol["devices"] = tuple(devices)
+        data["device_protocol"] = PublicDeviceProtocol(**protocol)
+        return PublicTimingReport(**data)
 
     try:
         data = record(ResultBundle, json.loads(text, parse_constant=reject_constant,
@@ -374,6 +808,8 @@ def load_bundle_json(text: str, *, expected_bundle_hash: str) -> ResultBundle:
         data["failed_gates"] = tuple(array(data["failed_gates"]))
         data["wording"] = tuple(WordingDisposition(**record(WordingDisposition, item))
                                    for item in array(data["wording"]))
+        if data["timing"] is not None:
+            data["timing"] = timing_report(data["timing"])
         bundle = ResultBundle(**data)
         validate_bundle(bundle)
     except (ValueError, TypeError, OverflowError, RecursionError, KeyError) as exc:
@@ -408,6 +844,55 @@ def render_svg(bundle: ResultBundle) -> str:
     return "".join(lines)
 
 
+def render_timing_html(timing: PublicTimingReport) -> str:
+    """Display copied aggregate values only; no stage/statistics reexecution."""
+    validate_timing_report(timing)
+
+    def number(value: float | int | bool | None) -> str:
+        return escape(json.dumps(value, allow_nan=False), quote=True)
+
+    summary = timing.summary
+    html = ['<section><h2>Host timing aggregates</h2>',
+            '<p>Observation state: ' + escape(timing.observation.status) + '. Source: ' +
+            escape(timing.observation.source_kind) + '. Operator receipts are assertions, not independent verification.</p>',
+            '<p>Capture-return to render-return/enqueue only. Sensor exposure and display photons: null (not measured).</p>',
+            '<table><tr><th>Received spans</th><th>Retained</th><th>Overflow</th><th>Backend drops</th><th>Backend overwrites</th><th>Accounting</th></tr>',
+            '<tr><td>' + number(summary.received_spans) + '</td><td>' + number(summary.retained_spans) +
+            '</td><td>' + number(summary.sample_overflow) + '</td><td>' + number(summary.reported_dropped_frames) +
+            '</td><td>' + number(summary.reported_overwritten_frames) + '</td><td>' + escape(summary.drop_accounting) + '</td></tr></table>',
+            '<table><tr><th>Phase</th><th>Stage (ms)</th><th>Valid</th><th>Unknown</th><th>p50</th><th>p95</th><th>p99</th><th>Unavailable reasons</th></tr>']
+    for phase in summary.phases:
+        for stage in phase.stages:
+            html.append('<tr><td>' + escape(phase.name) + '</td><td>' + escape(stage.name) + '</td><td>' +
+                        number(stage.valid_count) + '</td><td>' + number(stage.unknown_count) + '</td><td>' +
+                        number(stage.p50) + '</td><td>' + number(stage.p95) + '</td><td>' + number(stage.p99) +
+                        '</td><td>' + escape(json.dumps(stage.unknown_reasons, allow_nan=False)) +
+                        ('; ' + escape(stage.reason) if stage.reason else '') + '</td></tr>')
+    html.append('</table>')
+    if timing.session is not None:
+        session = timing.session
+        html.append('<h3>Session aggregate — ' + escape(session.status) + ' / ' + escape(session.stop_reason) + '</h3>')
+        html.append('<table><tr><th>Count</th><th>Value</th></tr>')
+        html.extend('<tr><td>' + escape(item.name) + '</td><td>' + number(item.value) + '</td></tr>' for item in session.counts)
+        html.append('</table><p>Initialization ms: ' + number(session.initialization_ms) +
+                    '; reason: ' + escape(session.initialization_reason or 'none') + '</p>')
+    html.append('<h2>2 devices, not a device survey</h2><p>Two protocol slots and three requested sessions each do not establish two observed or physically distinct devices. Native/offline/human independence remains unverified.</p>')
+    for device in timing.device_protocol.devices:
+        html.append('<h3>' + escape(device.machine_slot) + ' — requested ' + str(device.requested_width) + '×' + str(device.requested_height) + '</h3>')
+        html.append('<table><tr><th>Operator-reported device field</th><th>Value</th></tr>')
+        html.extend('<tr><td>' + escape(item.name) + '</td><td>' + number(item.value) + '</td></tr>'
+                    for item in (*device.observations, *device.assertions))
+        html.append('</table>')
+        for receipt in device.sessions:
+            html.append('<h4>Session ' + str(receipt.session_number) + ' — requested60s; observations below are not inferred</h4>')
+            html.append('<table><tr><th>Operator-reported observation/assertion</th><th>Value</th></tr>')
+            html.extend('<tr><td>' + escape(item.name) + '</td><td>' + number(item.value) + '</td></tr>'
+                        for item in (*receipt.observations, *receipt.assertions))
+            html.append('</table>')
+    html.append('</section>')
+    return '\n'.join(html)
+
+
 def render_html(bundle: ResultBundle) -> str:
     data = payload(bundle)  # Same validated values used by JSON; no metric recomputation.
     statement = CLAIM_TEXT[bundle.claim_category]
@@ -431,6 +916,8 @@ def render_html(bundle: ResultBundle) -> str:
         html.append('</table><table><tr><th>Metric</th><th>Value / unavailable reason</th></tr>')
         html.extend('<tr><td>' + escape(metric.name) + '</td><td>' + _value(metric) + '</td></tr>' for metric in arm.metrics)
         html.append('</table><p>Failure taxonomy counts represent supplied annotations; unclassified support remains visible.</p></section>')
+    if bundle.timing is not None:
+        html.append(render_timing_html(bundle.timing))
     html.append(render_svg(bundle))
     # JSON is rendered as escaped TEXT, never an executable script/template block.
     html.append('<h2>Complete aggregate values, supports, bins, intervals and failed gates</h2><pre>' +
