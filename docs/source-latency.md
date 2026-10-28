@@ -72,7 +72,7 @@ authorized encrypted private root outside sync/Git. No output writer is provided
 ## Guarded session and cleanup
 
 `run_session(source_factory,renderer_factory,authorization=SessionAuthorization(),
-input_kind=...,counter=None,read_instrumented=None,gate_reason=None,
+input_kind=...,counter=None,read_instrumented=None,gate_reason=counter_gate_reason,
 stop_requested=...,max_seconds=60,max_frames=7201)` defaults to denied permission.
 Factories are called only after validation. For real video/camera, rights_admitted
 must be True and offline_receipt_sha256/private_boundary_receipt_sha256 must be
@@ -120,10 +120,17 @@ There is no retry/spin on permission denial, invalid index or source error.
 Normal EOF, stop, timeout, callback error and interruption all attempt renderer
 close then source close, even when one close fails. Cleanup failures are errors.
 
-The optional `gate_reason(counter,latest_scalar)` callback supplies the current
-causal gate as a closed Reason or None for open. No such public producer API is
-currently integrated. Without it the display says `not counting:
-live_gate_unavailable`; it does not certify a successful gate. DisplayState fields
+The default `counter_gate_reason(counter,latest_scalar)` public producer supplies
+the current causal gate as a closed Reason or a callback result of None for open.
+It receives the exact final attached scalar object most recently passed successfully
+to that same Counter.update, after the conversion/replay loop and before rendering.
+No copy, pre-attach scalar or stale warmup object is substituted. An explicit
+caller callback overrides the default; explicit parameter gate_reason=None disables
+the producer and displays `not counting: evidence_metadata_unavailable` (closed
+Reason.EVIDENCE_UNAVAILABLE), never an inferred open gate. No output during warmup
+displays the closed Reason.WARMUP. Open means current gate only, not final confidence,
+fitness or device success. The callback does not finish/mutate/recompute the counter.
+DisplayState fields
 are provisional_count, newly_emitted, gate_message, provisional=True. All counter
 emissions are retained before rendering; late refusal/stop/failure cannot erase
 them. Gate status never changes Counter events. Count/provisional labels are

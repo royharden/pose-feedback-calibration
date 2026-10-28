@@ -55,7 +55,7 @@ precede preprocessing and inference; the adapter stores no unbounded raw history
 
 `run_device_session(*, manifest,privacy,device_authorization,
 session_authorization=SessionAuthorization(),preview_authorized=False,
-pixel_aspect,video_path=None,camera_index=None,counter=None,gate_reason=None,
+pixel_aspect,video_path=None,camera_index=None,counter=None,gate_reason=counter_gate_reason,
 stop_requested=...,max_seconds=60,max_frames=7201) -> SessionResult` selects
 exactly one explicit input. Both default session denial and preview denial occur
 before opening. Real-session receipt digests, rights assertion, all four
@@ -81,14 +81,22 @@ immutable and remain retained across later read/preview/render failures.
 
 ## Counter-owner reconciliation
 
-The public causal gate producer is still unavailable. The wrapper accepts
-`gate_reason(counter: Counter, latest_scalar: AngleFrame) -> Reason | None`:
-None asserts the current gate is open; closed gates return a public closed Reason.
-It must report already-computed current/past state without finishing/mutating the
-counter, using future samples, inspecting arbitrary private internals, or duplicating
-movement/evidence math. INT must route this concrete API requirement to the counter
-owner. Until that implementation is granted/integrated, the wrapper keeps
-`not counting: live_gate_unavailable`. No successful gate or live readiness is claimed.
+The integrated public `counter.counter_gate_reason(counter, latest_scalar)` is the
+safe default in both run_session and run_device_session. It reports already-computed
+current/past gate state without finishing/mutating the counter, future samples,
+private-state inspection or duplicated movement/evidence math. The wrapper forwards
+the default or explicit override unchanged. The controller passes the exact final
+attached scalar object most recently accepted by the same Counter.update, after
+all current conversion/warmup replay outputs and before display.
+
+The callback signature is `(counter: Counter, latest_scalar: AngleFrame) -> Reason
+| None`: a callback result of None means the CURRENT gate is open; blocked gates
+use closed Reason messages. Explicit parameter gate_reason=None disables the
+producer and stays failclosed as `not counting: evidence_metadata_unavailable`
+(Reason.EVIDENCE_UNAVAILABLE). No scalar output during buffered warmup uses
+Reason.WARMUP. Invalid callback results cause the existing sanitized session error
+and cleanup path. No final confidence, fitness or native-device success is inferred.
+Actual live readiness remains unverified.
 
 ## Deferred validation
 

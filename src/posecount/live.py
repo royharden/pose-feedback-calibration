@@ -10,11 +10,11 @@ import importlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol
 
-from .counter import Counter
+from .counter import Counter, counter_gate_reason
 from .geometry import GeometryAdapter
 from .landmarks import FrameBatch, LandmarkSource, SourceError
 from .latency import ClockAnchor, Span, SpanWriter, anchor_now
-from .schema import AngleFrame, Event, Prediction, Reason, attach_evidence
+from .schema import AngleFrame, Event, Prediction, Reason, attach_evidence, reason_message
 
 if TYPE_CHECKING:
     from .privacy import PrivacyPolicy
@@ -196,7 +196,7 @@ def run_session(
     input_kind: str,
     counter: Counter | None = None,
     read_instrumented: Callable[[LandmarkSource], ReadReceipt | None] | None = None,
-    gate_reason: Callable[[Counter, AngleFrame], Reason | None] | None = None,
+    gate_reason: Callable[[Counter, AngleFrame], Reason | None] | None = counter_gate_reason,
     stop_requested: Callable[[], bool] = lambda: False,
     max_seconds: float = 60.0,
     max_frames: int = 7201,
@@ -206,8 +206,8 @@ def run_session(
     One source read at a time; no retry on failure. Deadline is cooperative:
     callbacks must themselves return/timeout, including blocking device reads.
     Factories must release partial opens before raising. `gate_reason` is a
-    trusted producer callback for the current causal gate (None means open).
-    Without it the renderer states live_gate_unavailable, not an inferred pass.
+    public causal producer by default (a callback result of None means open).
+    Explicit gate_reason=None disables it and displays a closed unavailable reason.
     """
     if (type(max_seconds) not in (int, float) or not 0 < max_seconds <= 60
             or type(max_frames) is not int or not 1 <= max_frames <= 7201):
@@ -291,8 +291,8 @@ def run_session(
                     kwargs = converted.bridge_kwargs()
                     if kwargs is not None:
                         scalar = attach_evidence(scalar, **kwargs)
-                    latest_scalar = scalar
                     additions = detector.update(scalar)
+                    latest_scalar = scalar  # exact attached object accepted by update
                     # Preserve exposure before render/stop/error can occur.
                     visible = tuple(event for event in additions if event.emitted)
                     emitted.extend(visible)
@@ -301,12 +301,12 @@ def run_session(
                 frame_processed = True
                 processed += 1
                 if latest_scalar is None:
-                    message = "not counting: warmup"
+                    message = reason_message(Reason.WARMUP)
                 elif gate_reason is None:
-                    message = "not counting: live_gate_unavailable"
+                    message = reason_message(Reason.EVIDENCE_UNAVAILABLE)
                 else:
                     gate = gate_reason(detector, latest_scalar)
-                    message = "provisional count" if gate is None else f"not counting: {Reason(gate).value}"
+                    message = "provisional count" if gate is None else reason_message(Reason(gate))
                 rendered = renderer.render(batch, DisplayState(len(emitted), tuple(new_events), message))
                 if not isinstance(rendered, RenderReceipt):
                     rendered = None
@@ -425,7 +425,7 @@ def run_device_session(
     video_path: Path | None = None,
     camera_index: int | None = None,
     counter: Counter | None = None,
-    gate_reason: Callable[[Counter, AngleFrame], Reason | None] | None = None,
+    gate_reason: Callable[[Counter, AngleFrame], Reason | None] | None = counter_gate_reason,
     stop_requested: Callable[[], bool] = lambda: False,
     max_seconds: float = 60.0,
     max_frames: int = 7201,
