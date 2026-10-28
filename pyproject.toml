@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pose-feedback-calibration"
+version = "0.1.0"
+description = "Source-only causal squat event and numeric evidence foundation"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+posecount = "posecount.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
