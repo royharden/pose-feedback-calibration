@@ -473,13 +473,15 @@ class Counter:
                                  Reason.CONFIRMATION_EXPIRED,
                              }))
         elif self.arm == "A2":
-            result = replace(result, status="not_run", events=(), filtered_count=0,
+            result = replace(result, status="error" if result.status == "error" else "not_run",
+                             events=(), filtered_count=0,
                              final_count=None, reasons=(*result.reasons, Reason.CALIBRATION_UNAVAILABLE))
         elif self.arm == "A0v":
             assert isinstance(self._core, HysteresisCounter)
             threshold = self.config.visibility_threshold
             if threshold is None:
-                result = replace(result, status="not_run", events=(), filtered_count=0,
+                result = replace(result, status="error" if result.status == "error" else "not_run",
+                                 events=(), filtered_count=0,
                                  final_count=None, reasons=(*result.reasons, Reason.POLICY_UNAVAILABLE))
             elif result.status != "error":
                 score = self._core.mean_visibility()
