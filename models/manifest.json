@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "state": "unacquired",
+  "rights_approved": null,
+  "model": {
+    "proposed_variant": "Full float16/1",
+    "path": null,
+    "sha256": null,
+    "source": null,
+    "license": null,
+    "rights_evidence": null
+  },
+  "runtimes": {
+    "mediapipe": {"package_root": null, "version": null, "tree_sha256": null},
+    "cv2": {"package_root": null, "version": null, "tree_sha256": null}
+  },
+  "inference_options": {
+    "delegate": null,
+    "min_pose_detection_confidence": null,
+    "min_pose_presence_confidence": null,
+    "min_tracking_confidence": null
+  },
+  "note": "Unacquired placeholders only. Full float16/1 is a proposed variant, not an acquired or approved pin. Inference settings require explicit approved values; no library defaults are assumed. No model, runtime, license, device, or private-data approval is asserted. No automatic download or fallback."
+}
