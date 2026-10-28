@@ -10,11 +10,13 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from posecount.custody import ALL_ARMS, AdmissionEvidence, Attempt, CustodyStore, EditionPins
+from posecount.custody import ALL_ARMS, AdmissionEvidence, Attempt, CustodyStore, CustodySummary, EditionPins
 from posecount.calibrate import MapArtifact
-from posecount.pipeline import CounterRequest, HeldoutSourceAdmission, SourceAdmission, run_source
+from posecount.pipeline import CounterRequest, HeldoutSourceAdmission, SourceAdmission, _plain_output_path, run_source
 from posecount.privacy import PrivacyPolicy
-from posecount.report import ResultBundle, bundle_hash, canonical_json, validate_bundle
+from posecount.report import (
+    ResultBundle, bundle_hash, canonical_json, load_bundle_json, validate_bundle, write_artifacts,
+)
 from posecount.schema import Prediction, Reason
 from posecount.tuning import (
     CountLabel, CounterRow, FitAuthorization, ParameterConfig, WindowInput,
@@ -30,6 +32,7 @@ from .runner import (
 )
 from .split import canonical_digest
 from .stats import ClaimGates
+from .results_writer import edition_hash
 
 
 @dataclass(frozen=True, repr=False)
@@ -472,3 +475,139 @@ class CustodianEdition:
         # Custody verifies seal/withdrawal before and after; callback gets only
         # aggregate data, never extractor/predictor/gold callbacks.
         return self._custody.rerender(self._attempt, commitment, lambda _: renderer(bundle))
+
+
+@dataclass(frozen=True, repr=False)
+class CompletedReportRoot:
+    """Owner-established external root, never sourced from untrusted report JSON.
+
+    source_seal is the runner's semantic prediction seal; predictions_hash is
+    custody's sealed envelope BYTE hash. They are deliberately distinct pins.
+    The actual owner verifier must attest their relationship to this report.
+    """
+
+    attempt: Attempt
+    pins: EditionPins
+    trace_hash: str
+    predictions_hash: str
+    source_seal: str
+    report_hash: str
+
+    def __post_init__(self) -> None:
+        if (type(self.attempt) is not Attempt or type(self.pins) is not EditionPins
+                or self.attempt.pins_hash != self.pins.digest):
+            raise ValueError("completed_attempt_pin_root_required")
+        for value in (self.trace_hash, self.predictions_hash, self.source_seal, self.report_hash):
+            require_sha256(value)
+
+
+@dataclass(frozen=True, repr=False)
+class CompletedReport:
+    """Read-only completed-report binding; no run/extract/predict/gold interface.
+
+    No I/O at construction. Every restoration/render rechecks current actual
+    host authority and completed custody state. Bytes are retained immutably,
+    never used to establish their own external expected root or approval.
+    """
+
+    _host: TrustedHost
+    _custody: CustodyStore
+    _privacy: PrivacyPolicy
+    _root: CompletedReportRoot
+    _verify_completed: Callable[[CompletedReportRoot, CustodySummary], bool]
+    _payload: bytes = b""
+
+    def __post_init__(self) -> None:
+        if (type(self._host) is not TrustedHost or type(self._custody) is not CustodyStore
+                or type(self._privacy) is not PrivacyPolicy or type(self._root) is not CompletedReportRoot
+                or not callable(self._verify_completed) or type(self._payload) is not bytes):
+            raise PermissionError("explicit_completed_report_host_required")
+
+    def _check_current(self, action: str) -> None:
+        root = self._root
+        self._host.refresh(action, root.attempt.attempt_id)
+        if root.pins != self._host._pins:
+            raise PermissionError("completed_report_current_pins_mismatch")
+        summary = self._custody.summary(root.attempt)
+        if (type(summary) is not CustodySummary or summary.state != "complete" or summary.withdrawn is not False
+                or summary.attempt_id != root.attempt.attempt_id or summary.pins_hash != root.pins.digest
+                or summary.trace_hash != root.trace_hash or summary.predictions_hash != root.predictions_hash
+                or summary.report_hash != root.report_hash):
+            raise PermissionError("current_completed_sealed_report_required")
+        # This owner capability must verify actual persisted roots/window census,
+        # semantic-vs-byte seal linkage and current consent/role/withdrawal state.
+        # A hash/result/Attempt or values copied from the payload are not evidence.
+        _require_true(self._verify_completed, root, summary)
+
+    def _hydrate(self) -> ResultBundle:
+        raw, root = self._payload, self._root
+        if not 0 < len(raw) <= 4 * 1024 * 1024 or sha256(raw).hexdigest() != root.report_hash:
+            raise ValueError("immutable_aggregate_bytes_mismatch")
+        try:
+            bundle = load_bundle_json(raw.decode("utf-8"), expected_bundle_hash=root.report_hash)
+        except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
+            raise ValueError("completed_aggregate_unavailable") from None
+        # Actual report.json uses canonical_json bytes. Reject reformatted/BOM/
+        # trailing/modified inputs instead of normalizing them into a new report.
+        if raw != canonical_json(bundle).encode("utf-8") or bundle.state != "measured":
+            raise ValueError("canonical_completed_measured_aggregate_required")
+        expected_edition = edition_hash(root.attempt.edition)
+        if bundle.source_seal != root.source_seal or {arm.arm for arm in bundle.arms} != set(ALL_ARMS):
+            raise ValueError("completed_semantic_seal_or_arm_census_mismatch")
+        heldout_people = {a.person_digest for a in self._host._g0.split.assignments if a.split == "heldout"}
+        scheduled = tuple(w for w in self._host._g0.windows if w.person_digest in heldout_people)
+        counts = {"people": len(heldout_people), "scheduled": len(scheduled),
+                  "scheduled_positive": sum(w.kind == "positive" for w in scheduled),
+                  "scheduled_negative": sum(w.kind != "positive" for w in scheduled)}
+        if len(bundle.arms) != len(ALL_ARMS) or counts["people"] != 8 or counts["scheduled"] != 96:
+            raise ValueError("complete_original_heldout_report_required")
+        for arm in bundle.arms:
+            if ((arm.corpus, arm.split, arm.edition_hash) != ("real", "held_out", expected_edition)
+                    or any(dict(arm.support).get(name) != count for name, count in counts.items())):
+                raise ValueError("completed_report_edition_or_scheduled_support_mismatch")
+        comparison = bundle.comparison
+        if (comparison is None or (comparison.corpus, comparison.split, comparison.edition_hash, comparison.people)
+                != ("real", "held_out", expected_edition, 8)):
+            raise ValueError("completed_report_comparison_identity_mismatch")
+        return bundle
+
+    @classmethod
+    def restore(cls, *, host: TrustedHost, custody: CustodyStore, privacy: PrivacyPolicy,
+                root: CompletedReportRoot, aggregate_path: Path,
+                verify_completed: Callable[[CompletedReportRoot, CustodySummary], bool]) -> "CompletedReport":
+        """Future exact-path aggregate read, only after current owner/state checks."""
+        view = cls(host, custody, privacy, root, verify_completed)
+        view._check_current("host.edition.restore")  # BEFORE any payload/path read.
+        canonical = privacy.validate(aggregate_path)
+        _require_true(host._authorize, "host.report.read", str(canonical))
+        try:
+            with canonical.open("rb") as stream:
+                raw = stream.read(4 * 1024 * 1024 + 1)
+        except OSError:
+            raise ValueError("completed_aggregate_unavailable") from None
+        restored = replace(view, _payload=raw)
+        restored._hydrate()
+        restored._check_current("host.edition.restore")  # Reject state changes during read.
+        return restored
+
+    def rerender(self, directory: Path) -> tuple[Path, ...]:
+        """Exclusive new artifacts from exact retained aggregate; never reevaluate."""
+        self._check_current("host.edition.rerender")
+        bundle = self._hydrate()
+        target = _plain_output_path(directory)
+        if target.exists():
+            raise FileExistsError("fresh_report_directory_required")
+        _require_true(self._host._authorize, "host.report.write", str(target))
+        outputs: list[Path] = []
+
+        def render(_sealed_prediction_path: Path) -> str:
+            # Custody itself verifies the immutable prediction byte seal and
+            # withdrawal around this callback; no private predictions are loaded.
+            self._check_current("host.edition.rerender")
+            outputs.extend(write_artifacts(target, bundle, expected_bundle_hash=self._root.report_hash))
+            self._check_current("host.edition.rerender")
+            return bundle_hash(bundle)
+
+        self._custody.rerender(self._root.attempt, self._root.report_hash, render)
+        self._check_current("host.edition.rerender")
+        return tuple(outputs)

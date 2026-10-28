@@ -96,9 +96,10 @@ actual authorized local host supplies them. No fake capability is installed.
    verifier against actual schedule/pins before existing claim selection runs.
 8. `rerender(renderer)` gives only the retained immutable aggregate ResultBundle to
    a renderer and requires the exact same report hash through actual custody checks.
-   It never calls extractor/predictor/gold again. No post-crash resume/rehydration
-   facility is implemented: a fresh host must not reevaluate a consumed edition.
-   Restart-safe aggregate rehydration is a named residual source seam.
+   It never calls extractor/predictor/gold again. No evaluation recovery or retry
+   is provided: a fresh host must not reevaluate a consumed
+   edition. The separate completed-report restoration below reloads only an
+   already completed immutable aggregate for rerender.
 
 ## Frozen A2 and unavailable paths
 
@@ -133,8 +134,79 @@ guards, report escaping/hash identity, fsync/platform durability and restart beh
 No independent fixtures or expected answers were authored. Actual host callbacks
 must be audited for label leakage, side channels and current role ownership.
 
-Residual source seams: durable validated aggregate rehydration after a completed
-process restart; host cancellation of already-running native work on withdrawal;
+Residual source seams: host cancellation of already-running native work on withdrawal;
 public latency numeric DTO reconciliation remains separately owned. No extra
 private-data/camera/model CLI exists. The development unmeasured report module is
 now integrated; its actual caller is statically reconciled, with runtime unverified.
+
+## Completed-report restoration after process restart
+
+`CompletedReportRoot` is an externally established owner root: exact persisted
+Attempt/EditionPins, trace commitment, custody prediction-envelope BYTE SHA256,
+runner semantic prediction `source_seal`, and expected aggregate report hash.
+It is never loaded from the untrusted JSON being checked. The report hash is the
+existing `bundle_hash` identity, not a new hash format. The two prediction seals
+are intentionally different definitions. Required `verify_completed(root,summary)`
+must independently verify their actual relationship, complete scheduled-window
+identity/census and the current code/model/runtime/config/map/policy/rights closure
+against authoritative private owner records. A copied digest, AdmissionResult,
+Attempt or approval flag cannot establish that external root. No verifier or
+actual evidence is supplied here.
+
+`CompletedReport.restore(host=...,custody=...,privacy=...,root=...,
+aggregate_path=...,verify_completed=...)` is the sole file-read entry point. It:
+
+- Freshly authorizes `host.edition.restore` on the attempt ID and invokes the actual
+  current host G0/G1/current-pin checks. Current EditionPins must equal the root.
+- Calls existing `CustodyStore.summary` to resolve that exact persisted Attempt.
+  It requires complete, nonwithdrawn state and matching attempt/pins/trace/
+  prediction-byte/report hashes before reading the supplied aggregate. Incomplete,
+  crashed, unknown, invalidated, stale or mismatched state refuses access.
+- Calls required external completion-root verification, existing PrivacyPolicy on
+  the exact supplied aggregate path, then `host.report.read` authorization on its
+  canonical private path. No directory scan, automatic newest-file selection,
+  source/gold read or database reconstruction is implemented.
+- Reads at most4MiB+1 bytes, requires exact original SHA256 against the external
+  expected report root, then calls the existing strict
+  `posecount.report.load_bundle_json(...,expected_bundle_hash=...)`. No schema or
+  loader is duplicated. Bytes must equal existing canonical_json output exactly:
+  reformatted/BOM/trailing/changed payloads reject, never silently normalize into
+  another report. Missing/oversized/partial/tampered/unknown input rejects.
+- Requires measured original real/held_out, all6arms, exact edition_hash from the
+  existing results_writer helper, matching semantic source seal, and scheduled
+  people/window/positive/negative support matching the current admitted G0 census.
+  Original comparison identity must also match. Null/unavailable measured outcomes
+  remain unchanged; an empty/unmeasured/incomplete shell cannot become a completed
+  study or host success. Actual exact window linkage remains the required owner's
+  completion-root verification obligation, not something inferred from counts.
+- Rechecks current host/custody/root authority after the read and retains only the
+  validated immutable bytes. It never resumes the evaluation state machine.
+
+`CompletedReport.rerender(NEW_DIRECTORY)` rechecks current authority and rehydrates
+the same retained bytes with the same loader/root checks. It uses existing Windows
+plain-path/no-link rules, a fresh output directory, `host.report.write` authorization
+on that destination, and actual `write_artifacts` with the unchanged expected bundle
+hash. Existing files/directories reject. Only aggregate data reaches the writer.
+The callback runs through existing CustodyStore.rerender, preserving its current
+completed/withdrawal/prediction-byte-seal/report identity checks before and after
+rendering; the new binding additionally rechecks actual host/root state around
+the writer. Custody's existing internal prediction-seal checks do not expose or
+rehydrate private predictions in this binding. No source, gold, tuning, fitting,
+statistics, number recalculation or mutable schema reconstruction occurs.
+
+The restored object has no run/extract/predict/gold/retry/resume API. A failed or
+withdrawn write leaves any partial artifacts for owner disposition; nothing is
+overwritten/deleted or retried. Later source-file tampering does not mutate already
+retained pinned bytes; a new restore rejects changed bytes. Concurrent hostile
+filesystem/owner behavior and cancellation of an already-running native callback
+remain trusted-operator/runtime boundaries. Required host callbacks enforce current
+roles, consent/withdrawal, canonical private roots and the actual external expected
+root; no name/hash alone proves them. This source performs no actual file/database
+read or rendering during construction.
+
+Deferred execution: completed versus partial/withdrawn/stale/unknown state; external
+root and current-map/edition/semantic-vs-byte seal linkage; private path authorization
+before reads; duplicate/unknown/BOM/reformatted/oversized/tampered JSON; original
+all-arm census and null outcomes; strict hydration/unchanged report hash; exclusive
+output, partial writes and withdrawal races; no reevaluation on restart. No tests,
+imports, SQLite, private records, reports or renderer were run to construct this.
