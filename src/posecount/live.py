@@ -7,13 +7,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-from typing import Callable, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from .counter import Counter
 from .geometry import GeometryAdapter
 from .landmarks import FrameBatch, LandmarkSource, SourceError
 from .latency import ClockAnchor, Span, SpanWriter, anchor_now
 from .schema import AngleFrame, Event, Prediction, Reason, attach_evidence
+
+if TYPE_CHECKING:
+    from .privacy import PrivacyPolicy
+    from .sources.device import DeviceAuthorization
 
 
 def _digest(value: object) -> bool:
@@ -45,8 +50,9 @@ class SessionAuthorization:
 class ReadReceipt:
     """Optional genuine source instrumentation; never rebased to another scope.
 
-    The current LandmarkSource has no preprocess/inference instrumentation. Its
-    receive_ns is monotonic_ns in a source scope, not this perf_counter_ns scope.
+    Generic LandmarkSource does not promise stage instrumentation. Its receive_ns
+    is a separate source clock, not this perf_counter_ns scope. The opt-in device
+    receipt API supplies actual anchors in the latency module's process scope.
     Do not turn source.read() completion (after inference) into capture_return.
     """
     batch: FrameBatch
@@ -55,6 +61,17 @@ class ReadReceipt:
     inference: ClockAnchor | None = None
     dropped_since_read: int | None = None
     overwritten_since_read: int | None = None
+
+
+class InstrumentedReadFailure(SourceError):
+    """Failed source stage with genuine reached anchors and no raw image/batch."""
+    def __init__(self, reason: str, *, capture_return: ClockAnchor | None = None,
+                 preprocess: ClockAnchor | None = None,
+                 inference: ClockAnchor | None = None) -> None:
+        super().__init__(reason)
+        self.capture_return = capture_return
+        self.preprocess = preprocess
+        self.inference = inference
 
 
 @dataclass(frozen=True)
@@ -125,6 +142,7 @@ class SessionResult:
     backend_overwritten: int | None
     slot_overwritten: int
     controller_dropped: int
+    failed_source_reads: int
     cleanup_errors: tuple[str, ...]
     timing: dict[str, object]
     initialization_ms: float | None
@@ -146,6 +164,7 @@ class SessionResult:
                 self.backend_dropped is None or self.backend_overwritten is None) else None,
             "slot_overwritten": self.slot_overwritten,
             "controller_dropped": self.controller_dropped,
+            "failed_source_reads": self.failed_source_reads,
             "cleanup_errors": self.cleanup_errors, "timing": self.timing,
             "initialization_ms": self.initialization_ms,
             "initialization_reason": self.initialization_reason,
@@ -204,6 +223,7 @@ def run_session(
     unavailable: set[int] = set()
     source_frames = processed = 0
     controller_dropped = 0
+    failed_source_reads = 0
     backend_drops = backend_overwrites = 0
     drop_known = overwrite_known = True
     cleanup_errors: list[str] = []
@@ -225,11 +245,21 @@ def run_session(
             if _elapsed(active_start, anchor_now()) >= max_seconds:
                 status, reason = "timeout", "session_deadline"
                 break
-            if read_instrumented is None:
-                batch = source.read()
-                receipt = None if batch is None else ReadReceipt(batch)
-            else:
-                receipt = read_instrumented(source)
+            try:
+                if read_instrumented is None:
+                    batch = source.read()
+                    receipt = None if batch is None else ReadReceipt(batch)
+                else:
+                    receipt = read_instrumented(source)
+            except InstrumentedReadFailure as exc:
+                failed_source_reads += 1
+                # A failed attempt is distinct from an accepted FrameBatch.
+                # Reached source stages survive; counter/render were not called.
+                timing.append(Span(frame_index, _elapsed(active_start, anchor_now()),
+                    capture_return=exc.capture_return, preprocess=exc.preprocess,
+                    inference=exc.inference))
+                drop_known = overwrite_known = False
+                raise
             if receipt is None:
                 break
             if not isinstance(receipt, ReadReceipt) or not isinstance(receipt.batch, FrameBatch):
@@ -350,7 +380,8 @@ def run_session(
     return SessionResult(status, reason, prediction, tuple(emitted), tuple(presentations),
         source_frames, processed, len(unavailable),
         reported_drops, reported_overwrites,
-        slot.overwritten, controller_dropped, tuple(cleanup_errors), timing_summary,
+        slot.overwritten, controller_dropped, failed_source_reads,
+        tuple(cleanup_errors), timing_summary,
         initialization_ms, initialization_reason)
 
 
@@ -383,3 +414,100 @@ class OpenCVRenderer:
         if self._opened and self._cv2 is not None:
             self._cv2.destroyWindow("M17 provisional count")
         self._opened = False
+
+
+def run_device_session(
+    *, manifest: Path, privacy: PrivacyPolicy,
+    device_authorization: DeviceAuthorization,
+    session_authorization: SessionAuthorization = SessionAuthorization(),
+    preview_authorized: bool = False,
+    pixel_aspect: float,
+    video_path: Path | None = None,
+    camera_index: int | None = None,
+    counter: Counter | None = None,
+    gate_reason: Callable[[Counter, AngleFrame], Reason | None] | None = None,
+    stop_requested: Callable[[], bool] = lambda: False,
+    max_seconds: float = 60.0,
+    max_frames: int = 7201,
+) -> SessionResult:
+    """Future explicit device entry; no CLI, discovery, acquisition or settings.
+
+    Every entry guard is evaluated before either factory can open resources.
+    The adapter independently rechecks rights/model/runtime/privacy evidence.
+    Operator receipts are assertions, not network/telemetry/consent verification.
+    A fresh process with approved offline/private boundaries remains mandatory.
+    """
+    if (video_path is None) == (camera_index is None):
+        raise SourceError("exactly_one_device_input_required")
+    kind = "camera" if camera_index is not None else "video"
+    session_authorization.validate(kind)
+    if preview_authorized is not True:
+        raise SourceError("preview_authorization_required")
+    if not all(value is True for value in (
+        device_authorization.processing_authorized,
+        device_authorization.operator_rights_confirmed,
+        device_authorization.offline_confirmed,
+        device_authorization.private_data_confirmed,
+    )):
+        raise SourceError("operator_authorization_required")
+    if privacy.boundaries_verified is not True:
+        raise SourceError("private_boundary_unverified")
+    # Pure local adapter import; optional runtimes are still lazy inside open.
+    from .sources.device import CameraSource, VideoSource
+
+    opened: VideoSource | None = None
+
+    def source_factory() -> VideoSource:
+        nonlocal opened
+        kwargs = dict(manifest=manifest, privacy=privacy,
+            authorization=device_authorization, pixel_aspect=pixel_aspect,
+            preview_authorized=preview_authorized)
+        if camera_index is not None:
+            source = CameraSource(camera_index, **kwargs)
+        else:
+            assert video_path is not None
+            source = VideoSource(video_path, **kwargs)
+        try:
+            opened = source.open()
+            return opened
+        except BaseException:
+            # Covers interrupted partial opens as well as ordinary failures.
+            try:
+                source.close()
+            except BaseException:
+                pass
+            raise
+
+    def read_device(source: LandmarkSource) -> ReadReceipt | None:
+        if source is not opened or opened is None:
+            raise SourceError("device_session_source_mismatch")
+        receipt = opened.read_receipt()
+        if receipt is None:
+            return None
+        if receipt.failure_reason is not None:
+            raise InstrumentedReadFailure(receipt.failure_reason,
+                capture_return=receipt.capture_return, preprocess=receipt.preprocess,
+                inference=receipt.inference)
+        if not isinstance(receipt.batch, FrameBatch):
+            raise InstrumentedReadFailure("invalid_read_receipt",
+                capture_return=receipt.capture_return, preprocess=receipt.preprocess,
+                inference=receipt.inference)
+        return ReadReceipt(receipt.batch, receipt.capture_return, receipt.preprocess,
+            receipt.inference, receipt.dropped_since_read, receipt.overwritten_since_read)
+
+    def image_for(batch: FrameBatch, state: DisplayState) -> object:
+        if opened is None:
+            raise SourceError("device_session_source_mismatch")
+        # This is the sole raw-pixel path: approved source -> approved renderer.
+        image = opened.consume_preview(batch, authorization=device_authorization)
+        cv2 = importlib.import_module("cv2")  # already pinned/loaded by source.open
+        cv2.putText(image, f"Provisional count: {state.provisional_count}",
+            (10, 24), cv2.FONT_HERSHEY_SIMPLEX, .6, (255, 255, 255), 1)
+        cv2.putText(image, state.gate_message, (10, 48),
+            cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 255, 255), 1)
+        return image
+
+    return run_session(source_factory, lambda: OpenCVRenderer(image_for),
+        authorization=session_authorization, input_kind=kind, counter=counter,
+        read_instrumented=read_device, gate_reason=gate_reason,
+        stop_requested=stop_requested, max_seconds=max_seconds, max_frames=max_frames)
