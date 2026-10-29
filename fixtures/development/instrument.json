@@ -1,0 +1,13 @@
+{
+  "kind": "builder_development_instrument",
+  "independently_frozen": false,
+  "generated_windows": 0,
+  "seed_first": 1000,
+  "seed_last": 1599,
+  "seed_count": 600,
+  "strength_levels": [0.25, 0.5, 0.75],
+  "strength_provenance": "Builder development settings, not independent schedules or expected answers",
+  "perturbations": ["occlusion", "dropout", "jitter", "partial_rom", "pause", "speed_drift", "yaw", "left_right_swap", "frame_drop", "timestamp_gap", "second_person", "reentry", "camera_obstruction"],
+  "public_license": null,
+  "note": "No windows or held-out truth generated. Runtime and direct effects unverified. This file describes the original development generator only."
+}
